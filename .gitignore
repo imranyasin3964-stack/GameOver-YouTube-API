@@ -1,0 +1,24 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Cache media files
+cache/
+*.mp3
+*.mp4
+*.m4a
+*.webm
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# Logs
+logs.txt
+*.log
+
+# Temp files
+*.tmp
+tmp_*

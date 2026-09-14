@@ -1,0 +1,17 @@
+[Unit]
+Description=GameOver YouTube High-Speed Streaming API
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/GameOver-YouTube-API
+ExecStart=/root/GameOver-YouTube-API/venv/bin/python3 /root/GameOver-YouTube-API/main.py
+Restart=always
+RestartSec=3
+Environment=API_PORT=3001
+Environment=API_HOST=0.0.0.0
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
