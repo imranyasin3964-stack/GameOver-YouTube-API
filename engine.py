@@ -82,29 +82,40 @@ def resolve_metadata_sync(query: str) -> Dict[str, Any]:
     opts = get_ydl_base_opts()
     opts["extract_flat"] = True
 
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(search_url, download=False)
-        if "entries" in info:
-            entries = list(info.get("entries", []))
-            if not entries:
-                raise ValueError("No search results found on YouTube.")
-            info = entries[0]
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(search_url, download=False)
+    except Exception as e:
+        if "cookiefile" in opts:
+            logger.warning(f"Metadata extraction with cookies failed ({e}). Retrying without cookies...")
+            opts_no_cookie = opts.copy()
+            opts_no_cookie.pop("cookiefile", None)
+            with yt_dlp.YoutubeDL(opts_no_cookie) as ydl:
+                info = ydl.extract_info(search_url, download=False)
+        else:
+            raise e
 
-        video_id = info.get("id")
-        title = info.get("title", "Unknown Title")
-        duration_sec = info.get("duration") or 0
-        thumbnail = info.get("thumbnail") or f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
-        uploader = info.get("uploader") or info.get("channel", "YouTube")
+    if "entries" in info:
+        entries = list(info.get("entries", []))
+        if not entries:
+            raise ValueError("No search results found on YouTube.")
+        info = entries[0]
 
-        return {
-            "id": video_id,
-            "title": title,
-            "duration": format_duration(duration_sec),
-            "duration_sec": int(duration_sec),
-            "thumbnail": thumbnail,
-            "uploader": uploader,
-            "webpage_url": f"https://www.youtube.com/watch?v={video_id}",
-        }
+    video_id = info.get("id")
+    title = info.get("title", "Unknown Title")
+    duration_sec = info.get("duration") or 0
+    thumbnail = info.get("thumbnail") or f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
+    uploader = info.get("uploader") or info.get("channel", "YouTube")
+
+    return {
+        "id": video_id,
+        "title": title,
+        "duration": format_duration(duration_sec),
+        "duration_sec": int(duration_sec),
+        "thumbnail": thumbnail,
+        "uploader": uploader,
+        "webpage_url": f"https://www.youtube.com/watch?v={video_id}",
+    }
 
 
 def download_media_sync(video_id: str, media_type: str = "audio", quality: Optional[str] = None) -> str:
@@ -127,7 +138,7 @@ def download_media_sync(video_id: str, media_type: str = "audio", quality: Optio
         height = quality if quality in ("360", "480", "720", "1080") else "480"
         # Download fast MP4 stream combining best video <= height and best audio
         opts.update({
-            "format": f"bestvideo[height<={height}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<={height}]+bestaudio/best[height<={height}]/best",
+            "format": f"bestvideo[height<={height}]+bestaudio/best[height<={height}]/best",
             "outtmpl": str(tmp_path),
             "merge_output_format": "mp4",
             "postprocessors": [{
@@ -138,7 +149,7 @@ def download_media_sync(video_id: str, media_type: str = "audio", quality: Optio
     else:
         # Audio download target -> Convert cleanly to high quality MP3
         opts.update({
-            "format": "bestaudio[ext=m4a]/bestaudio/best",
+            "format": "bestaudio/best",
             "outtmpl": str(tmp_path).replace(".mp3", ".%(ext)s"),
             "postprocessors": [{
                 "key": "FFmpegExtractAudio",
@@ -154,8 +165,18 @@ def download_media_sync(video_id: str, media_type: str = "audio", quality: Optio
         except Exception:
             pass
 
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        ydl.download([url])
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            ydl.download([url])
+    except Exception as e:
+        if "cookiefile" in opts:
+            logger.warning(f"Download with cookies failed ({e}). Retrying directly without cookies...")
+            opts_no_cookie = opts.copy()
+            opts_no_cookie.pop("cookiefile", None)
+            with yt_dlp.YoutubeDL(opts_no_cookie) as ydl:
+                ydl.download([url])
+        else:
+            raise e
 
     # Ensure output matches target_path
     expected_audio_out = get_cache_path(f"tmp_{filename}".replace(".mp3", ".mp3"))
