@@ -41,20 +41,24 @@ def format_duration(seconds: Optional[int]) -> str:
     return f"{m:02d}:{s:02d}"
 
 
-def get_ydl_base_opts() -> dict:
-    """Base options for yt-dlp. Uses cookies.txt if available, otherwise falls back to mobile clients."""
+def get_ydl_base_opts(use_cookies: bool = False) -> dict:
+    """
+    Base options for yt-dlp.
+    Prioritizes 'visionos', 'ios', 'android' clients without cookies (bypasses datacenter bot blocks).
+    Uses cookies only when explicitly requested as a fallback.
+    """
     from config import BASE_DIR
     
     opts = {
         "quiet": True,
         "no_warnings": True,
-        "socket_timeout": 15,
+        "socket_timeout": 20,
         "nocheckcertificate": True,
         "retries": 3,
         "fragment_retries": 3,
         "extractor_args": {
             "youtube": {
-                "player_client": ["android", "ios", "tv"]
+                "player_client": ["visionos", "ios", "android", "tv", "web"]
             }
         },
         "js_runtimes": {
@@ -63,10 +67,11 @@ def get_ydl_base_opts() -> dict:
         },
     }
 
-    # Auto-load cookies if cookies.txt is provided in the project directory
-    cookie_file = BASE_DIR / "cookies.txt"
-    if cookie_file.exists() and cookie_file.stat().st_size > 0:
-        opts["cookiefile"] = str(cookie_file)
+    if use_cookies:
+        cookie_file = BASE_DIR / "cookies.txt"
+        if cookie_file.exists() and cookie_file.stat().st_size > 0:
+            opts["cookiefile"] = str(cookie_file)
+            opts["extractor_args"]["youtube"]["player_client"] = ["web", "tv"]
         
     return opts
 
@@ -79,18 +84,18 @@ def resolve_metadata_sync(query: str) -> Dict[str, Any]:
     is_direct, target = extract_youtube_id_or_query(query)
     search_url = f"https://www.youtube.com/watch?v={target}" if is_direct else f"ytsearch1:{target}"
 
-    opts = get_ydl_base_opts()
+    opts = get_ydl_base_opts(use_cookies=False)
     opts["extract_flat"] = True
 
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(search_url, download=False)
     except Exception as e:
-        if "cookiefile" in opts:
-            logger.warning(f"Metadata extraction with cookies failed ({e}). Retrying without cookies...")
-            opts_no_cookie = opts.copy()
-            opts_no_cookie.pop("cookiefile", None)
-            with yt_dlp.YoutubeDL(opts_no_cookie) as ydl:
+        logger.warning(f"Direct metadata extraction failed ({e}). Retrying with cookies fallback...")
+        opts_cookie = get_ydl_base_opts(use_cookies=True)
+        opts_cookie["extract_flat"] = True
+        if "cookiefile" in opts_cookie:
+            with yt_dlp.YoutubeDL(opts_cookie) as ydl:
                 info = ydl.extract_info(search_url, download=False)
         else:
             raise e
@@ -130,13 +135,11 @@ def download_media_sync(video_id: str, media_type: str = "audio", quality: Optio
     if is_cached(filename):
         return filename
 
-    opts = get_ydl_base_opts()
+    opts = get_ydl_base_opts(use_cookies=False)
     url = f"https://www.youtube.com/watch?v={video_id}"
 
     if media_type.lower() == "video":
-        # Video resolution target
         height = quality if quality in ("360", "480", "720", "1080") else "480"
-        # Download fast MP4 stream combining best video <= height and best audio
         opts.update({
             "format": f"bestvideo[height<={height}]+bestaudio/best[height<={height}]/best",
             "outtmpl": str(tmp_path),
@@ -147,7 +150,6 @@ def download_media_sync(video_id: str, media_type: str = "audio", quality: Optio
             }],
         })
     else:
-        # Audio download target -> Convert cleanly to high quality MP3
         opts.update({
             "format": "bestaudio/best",
             "outtmpl": str(tmp_path).replace(".mp3", ".%(ext)s"),
@@ -169,11 +171,31 @@ def download_media_sync(video_id: str, media_type: str = "audio", quality: Optio
         with yt_dlp.YoutubeDL(opts) as ydl:
             ydl.download([url])
     except Exception as e:
-        if "cookiefile" in opts:
-            logger.warning(f"Download with cookies failed ({e}). Retrying directly without cookies...")
-            opts_no_cookie = opts.copy()
-            opts_no_cookie.pop("cookiefile", None)
-            with yt_dlp.YoutubeDL(opts_no_cookie) as ydl:
+        logger.warning(f"Direct download failed ({e}). Retrying with cookies fallback...")
+        opts_cookie = get_ydl_base_opts(use_cookies=True)
+        if "cookiefile" in opts_cookie:
+            if media_type.lower() == "video":
+                height = quality if quality in ("360", "480", "720", "1080") else "480"
+                opts_cookie.update({
+                    "format": f"bestvideo[height<={height}]+bestaudio/best[height<={height}]/best",
+                    "outtmpl": str(tmp_path),
+                    "merge_output_format": "mp4",
+                    "postprocessors": [{
+                        "key": "FFmpegVideoConvertor",
+                        "preferedformat": "mp4",
+                    }],
+                })
+            else:
+                opts_cookie.update({
+                    "format": "bestaudio/best",
+                    "outtmpl": str(tmp_path).replace(".mp3", ".%(ext)s"),
+                    "postprocessors": [{
+                        "key": "FFmpegExtractAudio",
+                        "preferredcodec": "mp3",
+                        "preferredquality": "192",
+                    }],
+                })
+            with yt_dlp.YoutubeDL(opts_cookie) as ydl:
                 ydl.download([url])
         else:
             raise e
