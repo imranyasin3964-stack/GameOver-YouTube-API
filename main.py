@@ -18,8 +18,8 @@ from cache_manager import (
     is_cached,
 )
 from engine import resolve_and_download
-
-from auto_cookie import extract_and_save_cookies, check_cookie_health, ensure_healthy_cookies
+from controller_db import check_and_increment_ip
+from telegram_bot import broadcast_api_log
 
 LOGS_FILE = Path(__file__).resolve().parent / "logs.txt"
 
@@ -62,14 +62,6 @@ app.add_middleware(
 START_TIME = time.time()
 
 
-async def background_cookie_refresher():
-    """Checks cookie status once on startup without overwriting user cookies"""
-    await asyncio.sleep(2)
-    loop = asyncio.get_event_loop()
-    logger.info("[Startup] Checking YouTube cookie status...")
-    await loop.run_in_executor(None, ensure_healthy_cookies)
-
-
 @app.on_event("startup")
 async def on_startup():
     logger.info("==================================================")
@@ -79,8 +71,9 @@ async def on_startup():
     logger.info("==================================================")
     # Start background 24h cache cleaner
     asyncio.create_task(cache_cleaner_task())
-    # Start background 30m Chrome cookie auto-refresher
-    asyncio.create_task(background_cookie_refresher())
+    # Start background Telegram Controller & Logger Bot
+    from telegram_bot import telegram_polling_loop
+    asyncio.create_task(telegram_polling_loop())
 
 
 @app.get("/favicon.ico", include_in_schema=False)
@@ -186,34 +179,6 @@ async def health_check():
     }
 
 
-@app.get("/refresh-cookies")
-async def refresh_cookies_now():
-    """Manually triggers cookie extraction from Chrome on the VPS"""
-    loop = asyncio.get_event_loop()
-    success = await loop.run_in_executor(None, extract_and_save_cookies, "chrome")
-    if success:
-        return {
-            "status": "success",
-            "message": "Cookies successfully extracted from Chrome and saved to cookies.txt!"
-        }
-    return {
-        "status": "error",
-        "message": "Could not extract cookies from Chrome. Please ensure you logged into YouTube on Chrome in RDP."
-    }
-
-
-@app.get("/cookies-health")
-async def cookies_health_endpoint():
-    """Instant check of YouTube cookie health"""
-    loop = asyncio.get_event_loop()
-    healthy = await loop.run_in_executor(None, check_cookie_health)
-    return {
-        "status": "healthy" if healthy else "degraded",
-        "healthy": healthy,
-        "message": "YouTube cookies are 100% active and verified! ✅" if healthy else "Cookies need refresh or Chrome login."
-    }
-
-
 @app.get("/logs", response_class=HTMLResponse)
 async def view_logs():
     """Live interactive log viewer for browser"""
@@ -276,6 +241,18 @@ async def download_media(
             detail="Missing required query parameter: 'url' (e.g. ?type=audio&url=tum+ho)"
         )
 
+    client_ip = request.client.host if request.client else "127.0.0.1"
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        client_ip = forwarded.split(",")[0].strip()
+
+    allowed, is_blocked, msg = check_and_increment_ip(client_ip)
+    if not allowed:
+        if is_blocked:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=msg)
+        else:
+            raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=msg)
+
     clean_query = target_url.strip()
     media_type = "video" if type.lower() == "video" else "audio"
 
@@ -283,6 +260,7 @@ async def download_media(
     if media_type == "video" and not quality:
         quality = "480"
 
+    start_time_req = time.time()
     try:
         result = await resolve_and_download(clean_query, media_type=media_type, quality=quality)
     except Exception as e:
@@ -298,6 +276,20 @@ async def download_media(
     req_base = str(request.base_url).rstrip("/")
     stream_url = f"{req_base}/media/{filename}"
     result["stream_url"] = stream_url
+
+    # Broadcast log to Telegram Bot admins
+    elapsed = round(time.time() - start_time_req, 2)
+    log_data = {
+        "ip": client_ip,
+        "query": clean_query,
+        "type": media_type,
+        "quality": quality or "default",
+        "cached": result.get("cached", False),
+        "elapsed_sec": elapsed,
+        "title": result.get("title", clean_query),
+        "response": result
+    }
+    asyncio.create_task(broadcast_api_log(log_data))
 
     # If user wants direct binary stream
     if stream:

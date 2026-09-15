@@ -22,3 +22,6 @@ logs.txt
 # Temp files
 *.tmp
 tmp_*
+
+# Database
+*.sqlite3
