@@ -58,7 +58,7 @@ def get_ydl_base_opts(use_cookies: bool = False) -> dict:
         "fragment_retries": 3,
         "extractor_args": {
             "youtube": {
-                "player_client": ["visionos", "ios", "android", "tv", "web"]
+                "player_client": ["android", "tvhtml5", "web"]
             }
         },
         "js_runtimes": {

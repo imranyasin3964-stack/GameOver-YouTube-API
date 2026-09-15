@@ -243,6 +243,8 @@ async def view_logs():
     return HTMLResponse(content=html)
 
 
+@app.get("/GET /download")
+@app.get("/GET/download")
 @app.get("/download")
 async def download_media(
     request: Request,
