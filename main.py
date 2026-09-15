@@ -18,7 +18,7 @@ from cache_manager import (
     is_cached,
 )
 from engine import resolve_and_download
-from scraper_engine import search_youtube_full
+from scraper_engine import search_youtube_full, extract_playlist_full
 from controller_db import check_and_increment_ip
 from telegram_bot import broadcast_api_log
 
@@ -287,6 +287,82 @@ async def search_media(
         "uploader": primary["uploader"],
         "youtube_url": primary["youtube_url"],
         "results": formatted_results,
+        "elapsed_sec": elapsed,
+        "developer": "@XHamsterFounders",
+    }
+    return JSONResponse(content=response_payload)
+
+
+@app.get("/GET /playlist")
+@app.get("/GET/playlist")
+@app.get("/playlist")
+async def playlist_media(
+    request: Request,
+    url: Optional[str] = Query(None, description="YouTube playlist URL or ID"),
+    list: Optional[str] = Query(None, description="YouTube playlist ID or URL"),
+    query: Optional[str] = Query(None, description="Alternative parameter for playlist URL"),
+    limit: int = Query(25, ge=1, le=50, description="Number of songs to fetch (default 25)"),
+):
+    """
+    Dedicated High-Speed YouTube Playlist API:
+    Extracts up to 25 songs (Index 1 to 25) with exact titles, durations, URLs,
+    and caches all thumbnails directly into local NVMe storage.
+    """
+    target = url or list or query
+    if not target:
+        raw_query = request.url.query
+        if "url=" in raw_query:
+            target = raw_query.split("url=", 1)[1].split("&")[0]
+        elif "list=" in raw_query:
+            target = raw_query.split("list=", 1)[1].split("&")[0]
+        elif "query=" in raw_query:
+            target = raw_query.split("query=", 1)[1].split("&")[0]
+
+    if not target or not target.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing required query parameter: 'url' or 'list' (e.g. /playlist?url=https://youtube.com/playlist?list=...)"
+        )
+
+    t_start = time.time()
+    try:
+        pl_data = await extract_playlist_full(target.strip(), max_items=limit)
+    except Exception as e:
+        logger.error(f"Playlist extraction failed for '{target}': {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to extract YouTube playlist: {str(e)}"
+        )
+
+    req_base = str(request.base_url).rstrip("/")
+    formatted_items = []
+    indexes_dict = {}
+
+    for i, itm in enumerate(pl_data["items"], 1):
+        local_thumb = f"{req_base}/media/{itm['thumbnail_file']}"
+        entry = {
+            "index": i,
+            "id": itm["id"],
+            "title": itm["title"],
+            "duration": itm["duration"],
+            "duration_sec": itm["duration_sec"],
+            "thumbnail": local_thumb,
+            "thumbnail_local": local_thumb,
+            "thumbnail_remote": itm["thumbnail_remote"],
+            "uploader": itm["uploader"],
+            "youtube_url": itm["youtube_url"],
+        }
+        formatted_items.append(entry)
+        indexes_dict[f"index_{i}"] = entry
+
+    elapsed = round(time.time() - t_start, 2)
+    response_payload = {
+        "status": "success",
+        "playlist_id": pl_data["playlist_id"],
+        "playlist_title": pl_data["playlist_title"],
+        "total_items": len(formatted_items),
+        "items": formatted_items,
+        "indexes": indexes_dict,
         "elapsed_sec": elapsed,
         "developer": "@XHamsterFounders",
     }
