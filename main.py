@@ -83,6 +83,11 @@ async def on_startup():
     asyncio.create_task(background_cookie_refresher())
 
 
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    return Response(status_code=204)
+
+
 @app.get("/", response_class=HTMLResponse)
 async def home_dashboard():
     """Interactive visual dashboard for GameOver YouTube API"""
