@@ -8,8 +8,8 @@ CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 # Server configuration
 HOST = os.getenv("API_HOST", "0.0.0.0")
-PORT = int(os.getenv("API_PORT", "3001"))
-BASE_URL = os.getenv("BASE_URL", "http://172.104.38.31:3001")
+PORT = int(os.getenv("API_PORT", "80"))
+BASE_URL = os.getenv("BASE_URL", "http://139.162.177.184:80")
 
 # Cache & Storage limits
 MAX_CACHE_SIZE_GB = float(os.getenv("MAX_CACHE_SIZE_GB", "15.0"))  # Auto-cleanup if exceeds 15GB
