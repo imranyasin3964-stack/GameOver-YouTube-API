@@ -18,6 +18,7 @@ from cache_manager import (
     is_cached,
 )
 from engine import resolve_and_download
+from scraper_engine import search_youtube_full
 from controller_db import check_and_increment_ip
 from telegram_bot import broadcast_api_log
 
@@ -213,6 +214,85 @@ async def view_logs():
     return HTMLResponse(content=html)
 
 
+@app.get("/GET /search")
+@app.get("/GET/search")
+@app.get("/search")
+async def search_media(
+    request: Request,
+    query: Optional[str] = Query(None, description="Song title, artist name, or YouTube URL"),
+    url: Optional[str] = Query(None, description="Alternative parameter for song URL or query"),
+    q: Optional[str] = Query(None, description="Short parameter for query"),
+):
+    """
+    Dedicated High-Speed YouTube Search Engine:
+    Zero cookies, zero download, instant response (0.2s - 0.4s).
+    Caches thumbnail in local NVMe storage and returns clean JSON.
+    """
+    target = query or url or q
+    if not target:
+        raw_query = request.url.query
+        if "query=" in raw_query:
+            target = raw_query.split("query=", 1)[1].split("&")[0]
+        elif "url=" in raw_query:
+            target = raw_query.split("url=", 1)[1].split("&")[0]
+        elif "q=" in raw_query:
+            target = raw_query.split("q=", 1)[1].split("&")[0]
+
+    if not target or not target.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing required query parameter: 'query' (e.g. /search?query=fakira)"
+        )
+
+    clean_query = target.strip()
+    t_start = time.time()
+
+    try:
+        search_data = await search_youtube_full(clean_query, max_results=5)
+    except Exception as e:
+        logger.error(f"Search failed for '{clean_query}': {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to search YouTube: {str(e)}"
+        )
+
+    req_base = str(request.base_url).rstrip("/")
+    primary = search_data["primary"]
+    thumb_name = primary["thumbnail_file"]
+    local_thumb_url = f"{req_base}/media/{thumb_name}"
+
+    formatted_results = []
+    for r in search_data.get("results", []):
+        r_thumb = f"{req_base}/media/{r['thumbnail_file']}"
+        formatted_results.append({
+            "id": r["id"],
+            "title": r["title"],
+            "duration": r["duration"],
+            "duration_sec": r["duration_sec"],
+            "thumbnail": r_thumb,
+            "uploader": r["uploader"],
+            "youtube_url": r["youtube_url"],
+        })
+
+    elapsed = round(time.time() - t_start, 2)
+    response_payload = {
+        "status": "success",
+        "id": primary["id"],
+        "title": primary["title"],
+        "duration": primary["duration"],
+        "duration_sec": primary["duration_sec"],
+        "thumbnail": local_thumb_url,
+        "thumbnail_local": local_thumb_url,
+        "thumbnail_remote": primary["thumbnail_remote"],
+        "uploader": primary["uploader"],
+        "youtube_url": primary["youtube_url"],
+        "results": formatted_results,
+        "elapsed_sec": elapsed,
+        "developer": "@XHamsterFounders",
+    }
+    return JSONResponse(content=response_payload)
+
+
 @app.get("/GET /download")
 @app.get("/GET/download")
 @app.get("/download")
@@ -325,7 +405,17 @@ def range_requests_response(request: Request, file_path: Path):
     file_size = file_path.stat().st_size
     range_header = request.headers.get("range")
 
-    content_type = "video/mp4" if file_path.suffix == ".mp4" else "audio/mpeg"
+    suffix = file_path.suffix.lower()
+    if suffix in (".jpg", ".jpeg"):
+        content_type = "image/jpeg"
+    elif suffix == ".png":
+        content_type = "image/png"
+    elif suffix == ".webp":
+        content_type = "image/webp"
+    elif suffix == ".mp4":
+        content_type = "video/mp4"
+    else:
+        content_type = "audio/mpeg"
 
     if not range_header:
         # Return complete file with Accept-Ranges
