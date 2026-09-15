@@ -1,3 +1,4 @@
+import os
 import asyncio
 import aiohttp
 import json
@@ -8,7 +9,7 @@ from typing import Optional, Dict, Any, List
 
 import controller_db
 from cache_manager import get_cache_stats
-from config import BASE_URL, PORT
+from config import BASE_URL, PORT, CACHE_DIR
 
 logger = logging.getLogger("GameOverAPI.TelegramBot")
 
@@ -89,6 +90,230 @@ async def edit_msg(chat_id: int, message_id: int, text: str, reply_markup: Optio
 async def delete_msg(chat_id: int, message_id: int) -> bool:
     res = await call_tg("deleteMessage", {"chat_id": chat_id, "message_id": message_id})
     return bool(res and res.get("ok"))
+
+
+async def send_photo_msg(chat_id: int, photo_url: str, caption: str, reply_markup: Optional[dict] = None) -> Optional[int]:
+    """Sends a photo card with caption and buttons. Falls back to text if photo delivery fails."""
+    payload = {
+        "chat_id": chat_id,
+        "photo": photo_url,
+        "caption": caption,
+        "parse_mode": "HTML",
+    }
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    res = await call_tg("sendPhoto", payload)
+    if res and res.get("ok"):
+        msg_id = res["result"]["message_id"]
+        controller_db.track_bot_message(chat_id, msg_id)
+        return msg_id
+    # Fallback to text message
+    fallback_text = f"🖼️ <a href=\"{photo_url}\">&#8205;</a>\n{caption}"
+    return await send_msg(chat_id, fallback_text, reply_markup=reply_markup)
+
+
+async def send_audio_file(chat_id: int, file_path: str, title: str, performer: str, duration: int, caption: str) -> bool:
+    """Uploads local MP3 file directly into Telegram chat via multipart/form-data"""
+    if not os.path.exists(file_path):
+        return False
+    url = f"{TELEGRAM_API_URL}/sendAudio"
+    data = aiohttp.FormData()
+    data.add_field("chat_id", str(chat_id))
+    data.add_field("title", title)
+    data.add_field("performer", performer)
+    data.add_field("duration", str(duration))
+    data.add_field("caption", caption)
+    data.add_field("parse_mode", "HTML")
+    with open(file_path, "rb") as f:
+        data.add_field("audio", f, filename=os.path.basename(file_path), content_type="audio/mpeg")
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.post(url, data=data, timeout=aiohttp.ClientTimeout(total=180.0)) as resp:
+                    res = await resp.json()
+                    return bool(res and res.get("ok"))
+            except Exception as e:
+                logger.error(f"Failed to upload audio to Telegram: {e}")
+                return False
+
+
+async def send_video_file(chat_id: int, file_path: str, caption: str) -> bool:
+    """Uploads local MP4 file directly into Telegram chat (if under 50MB)"""
+    if not os.path.exists(file_path):
+        return False
+    size_mb = os.path.getsize(file_path) / (1024 * 1024)
+    if size_mb > 49.0:
+        logger.info(f"Video {file_path} ({size_mb:.1f}MB) exceeds Telegram 50MB limit.")
+        return False
+    url = f"{TELEGRAM_API_URL}/sendVideo"
+    data = aiohttp.FormData()
+    data.add_field("chat_id", str(chat_id))
+    data.add_field("caption", caption)
+    data.add_field("parse_mode", "HTML")
+    data.add_field("supports_streaming", "true")
+    with open(file_path, "rb") as f:
+        data.add_field("video", f, filename=os.path.basename(file_path), content_type="video/mp4")
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.post(url, data=data, timeout=aiohttp.ClientTimeout(total=240.0)) as resp:
+                    res = await resp.json()
+                    return bool(res and res.get("ok"))
+            except Exception as e:
+                logger.error(f"Failed to upload video to Telegram: {e}")
+                return False
+
+
+async def download_and_upload_audio(chat_id: int, video_id: str, title: str = ""):
+    """Downloads audio via local engine and uploads directly into Telegram chat"""
+    progress_msg_id = await send_msg(
+        chat_id,
+        f"⏳ <b>Dᴏᴡɴʟᴏᴀᴅɪɴɢ Aᴜᴅɪᴏ...</b>\n🎵 <i>{title or video_id}</i>\nPʟᴇᴀsᴇ ᴡᴀɪᴛ ᴀ ғᴇᴡ sᴇᴄᴏɴᴅs..."
+    )
+    url = f"http://127.0.0.1:{PORT}/download?type=audio&url=https://www.youtube.com/watch?v={video_id}"
+    data = None
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=60.0)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+    except Exception as e:
+        logger.error(f"Download audio error: {e}")
+
+    if not data or data.get("status") != "success":
+        err_msg = data.get("detail", "Download failed") if isinstance(data, dict) else "Download failed"
+        await edit_msg(chat_id, progress_msg_id, f"❌ <b>Dᴏᴡɴʟᴏᴀᴅ Fᴀɪʟᴇᴅ:</b> <code>{err_msg}</code>")
+        return
+
+    filename = data.get("filename")
+    local_file = CACHE_DIR / filename if filename else None
+    stream_url = data.get("stream_url", "")
+    elapsed = data.get("elapsed_sec", 0.0)
+    dur_str = data.get("duration", "00:00")
+    dur_sec = data.get("duration_sec", 0)
+    song_title = data.get("title", title)
+    uploader = data.get("uploader", "YouTube")
+
+    if progress_msg_id:
+        await edit_msg(chat_id, progress_msg_id, f"📤 <b>Uᴘʟᴏᴀᴅɪɴɢ Aᴜᴅɪᴏ ᴛᴏ Tᴇʟᴇɢʀᴀᴍ...</b>\n🎵 <i>{song_title}</i>")
+
+    uploaded = False
+    if local_file and local_file.exists():
+        caption = (
+            f"🎵 <b>{song_title}</b>\n\n"
+            f"⏱️ <b>Dᴜʀᴀᴛɪᴏɴ:</b> <code>{dur_str}</code> | ⚡ <b>Sᴘᴇᴇᴅ:</b> <code>{elapsed}s</code>\n"
+            f"🔗 <b>Sᴛʀᴇᴀᴍ URL:</b> <code>{stream_url}</code>\n"
+            f"👨‍💻 <b>Dᴇᴠᴇʟᴏᴘᴇʀ:</b> {OWNER_HANDLE}"
+        )
+        uploaded = await send_audio_file(
+            chat_id=chat_id,
+            file_path=str(local_file),
+            title=song_title,
+            performer=uploader,
+            duration=dur_sec,
+            caption=caption,
+        )
+
+    if not uploaded:
+        text = (
+            f"🎵 <b>Aᴜᴅɪᴏ Rᴇᴀᴅʏ!</b>\n\n"
+            f"🎵 <b>Tɪᴛʟᴇ:</b> <code>{song_title}</code>\n"
+            f"⏱️ <b>Dᴜʀᴀᴛɪᴏɴ:</b> <code>{dur_str}</code> | ⚡ <b>Sᴘᴇᴇᴅ:</b> <code>{elapsed}s</code>\n"
+            f"🔗 <b>Sᴛʀᴇᴀᴍ URL:</b>\n<code>{stream_url}</code>\n\n"
+            f"👨‍💻 <b>Dᴇᴠᴇʟᴏᴘᴇʀ:</b> {OWNER_HANDLE}"
+        )
+        await send_msg(chat_id, text)
+
+    # Double response: copyable raw JSON
+    json_str = json.dumps(data, indent=2)
+    await send_msg(chat_id, f"📄 <b>Rᴇsᴘᴏɴsᴇ JSOɴ (Cᴏᴘʏᴀʙʟᴇ):</b>\n<pre><code class=\"language-json\">{json_str}</code></pre>")
+
+    if progress_msg_id:
+        await delete_msg(chat_id, progress_msg_id)
+
+
+async def ask_video_quality(chat_id: int, video_id: str, title: str = ""):
+    """Prompts user to select video resolution (720p, 480p, 360p)"""
+    text = (
+        f"🎬 <b>Sᴇʟᴇᴄᴛ Vɪᴅᴇᴏ Qᴜᴀʟɪᴛʏ:</b>\n\n"
+        f"🎵 <b>Tɪᴛʟᴇ:</b> <code>{title or video_id}</code>\n\n"
+        f"Cʟɪᴄᴋ ʏᴏᴜʀ ᴘʀᴇғᴇʀʀᴇᴅ ʀᴇsᴏʟᴜᴛɪᴏɴ ᴛᴏ ᴅᴏᴡɴʟᴏᴀᴅ &amp; ᴜᴘʟᴏᴀᴅ:"
+    )
+    inline_kb = {
+        "inline_keyboard": [
+            [
+                {"text": "🎬 720p (HD)", "callback_data": f"dl_vid:720:{video_id}"},
+                {"text": "🎬 480p (SD)", "callback_data": f"dl_vid:480:{video_id}"},
+            ],
+            [
+                {"text": "🎬 360p (Fast)", "callback_data": f"dl_vid:360:{video_id}"},
+                {"text": "🔙 Bᴀᴄᴋ", "callback_data": f"dl_cancel:{video_id}"},
+            ],
+        ]
+    }
+    await send_msg(chat_id, text, reply_markup=inline_kb)
+
+
+async def download_and_upload_video(chat_id: int, video_id: str, quality: str = "720", title: str = ""):
+    """Downloads video with requested quality and uploads directly to Telegram"""
+    progress_msg_id = await send_msg(
+        chat_id,
+        f"⏳ <b>Dᴏᴡɴʟᴏᴀᴅɪɴɢ Vɪᴅᴇᴏ ({quality}p)...</b>\n🎵 <i>{title or video_id}</i>\nPʟᴇᴀsᴇ ᴡᴀɪᴛ ᴀ ғᴇᴡ sᴇᴄᴏɴᴅs..."
+    )
+    url = f"http://127.0.0.1:{PORT}/download?type=video&quality={quality}&url=https://www.youtube.com/watch?v={video_id}"
+    data = None
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=120.0)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+    except Exception as e:
+        logger.error(f"Download video error: {e}")
+
+    if not data or data.get("status") != "success":
+        err_msg = data.get("detail", "Download failed") if isinstance(data, dict) else "Download failed"
+        await edit_msg(chat_id, progress_msg_id, f"❌ <b>Dᴏᴡɴʟᴏᴀᴅ Fᴀɪʟᴇᴅ:</b> <code>{err_msg}</code>")
+        return
+
+    filename = data.get("filename")
+    local_file = CACHE_DIR / filename if filename else None
+    stream_url = data.get("stream_url", "")
+    elapsed = data.get("elapsed_sec", 0.0)
+    dur_str = data.get("duration", "00:00")
+    vid_title = data.get("title", title)
+
+    if progress_msg_id:
+        await edit_msg(chat_id, progress_msg_id, f"📤 <b>Uᴘʟᴏᴀᴅɪɴɢ Vɪᴅᴇᴏ ({quality}p) ᴛᴏ Tᴇʟᴇɢʀᴀᴍ...</b>\n🎵 <i>{vid_title}</i>")
+
+    uploaded = False
+    if local_file and local_file.exists():
+        caption = (
+            f"🎬 <b>{vid_title}</b> ({quality}p)\n\n"
+            f"⏱️ <b>Dᴜʀᴀᴛɪᴏɴ:</b> <code>{dur_str}</code> | ⚡ <b>Sᴘᴇᴇᴅ:</b> <code>{elapsed}s</code>\n"
+            f"🔗 <b>Sᴛʀᴇᴀᴍ URL:</b> <code>{stream_url}</code>\n"
+            f"👨‍💻 <b>Dᴇᴠᴇʟᴏᴘᴇʀ:</b> {OWNER_HANDLE}"
+        )
+        uploaded = await send_video_file(chat_id=chat_id, file_path=str(local_file), caption=caption)
+
+    if not uploaded:
+        size_str = ""
+        if local_file and local_file.exists():
+            size_mb = os.path.getsize(local_file) / (1024 * 1024)
+            size_str = f"⚠️ <i>Fɪʟᴇ sɪᴢᴇ ({size_mb:.1f} MB) ᴇxᴄᴇᴇᴅs Tᴇʟᴇɢʀᴀᴍ's 50MB ʙᴏᴛ ᴜᴘʟᴏᴀᴅ ʟɪᴍɪᴛ.</i>\n\n"
+        text = (
+            f"🎬 <b>Vɪᴅᴇᴏ Rᴇᴀᴅʏ ({quality}p)!</b>\n\n"
+            f"🎵 <b>Tɪᴛʟᴇ:</b> <code>{vid_title}</code>\n"
+            f"⏱️ <b>Dᴜʀᴀᴛɪᴏɴ:</b> <code>{dur_str}</code> | ⚡ <b>Sᴘᴇᴇᴅ:</b> <code>{elapsed}s</code>\n\n"
+            f"{size_str}"
+            f"🔗 <b>Wᴀᴛᴄʜ / Dᴏᴡɴʟᴏᴀᴅ Dɪʀᴇᴄᴛʟʏ:</b>\n<code>{stream_url}</code>\n\n"
+            f"👨‍💻 <b>Dᴇᴠᴇʟᴏᴘᴇʀ:</b> {OWNER_HANDLE}"
+        )
+        await send_msg(chat_id, text)
+
+    # Double response: copyable raw JSON
+    json_str = json.dumps(data, indent=2)
+    await send_msg(chat_id, f"📄 <b>Rᴇsᴘᴏɴsᴇ JSOɴ (Cᴏᴘʏᴀʙʟᴇ):</b>\n<pre><code class=\"language-json\">{json_str}</code></pre>")
+
+    if progress_msg_id:
+        await delete_msg(chat_id, progress_msg_id)
 
 
 async def broadcast_api_log(log_data: dict):
@@ -485,34 +710,67 @@ async def execute_api_test(chat_id: int, input_text: str, forced_mode: Optional[
                     data = await resp.json()
 
     except asyncio.TimeoutError:
-        err_text = "⏱️ <b>API Tɪᴍᴇᴏᴜᴛ:</b> Tʜᴇ sᴇʀᴠᴇʀ ᴛᴏᴏᴋ ʟᴏɴɢᴇʀ ᴛʜᴀɴ 45s ᴛᴏ ʀᴇsᴘᴏɴᴅ."
-        if loading_msg_id:
-            await edit_msg(chat_id, loading_msg_id, err_text)
-        else:
-            await send_msg(chat_id, err_text)
-        return
-    except Exception as e:
-        err_text = f"❌ <b>API Rᴇǫᴜᴇsᴛ Fᴀɪʟᴇᴅ:</b> <code>{str(e)}</code>"
-        if loading_msg_id:
-            await edit_msg(chat_id, loading_msg_id, err_text)
-        else:
-            await send_msg(chat_id, err_text)
-        return
-
-    if status_code != 200 or not isinstance(data, dict) or data.get("status") == "error":
-        err_msg = data.get("detail") if isinstance(data, dict) else "Unknown error"
-        err_text = (
-            f"❌ <b>API Eʀʀᴏʀ ({status_code})</b>\n\n"
-            f"<b>Eɴᴅᴘᴏɪɴᴛ:</b> <code>{api_label}</code>\n"
-            f"<b>Dᴇᴛᴀɪʟ:</b> <code>{err_msg}</code>"
+        err_msg = (
+            f"❌ <b>Rᴇǫᴜᴇsᴛ Tɪᴍᴇᴏᴜᴛ</b>\n\n"
+            f"The API took longer than 45s to respond.\n"
+            f"<b>Endpoint:</b> <code>{endpoint_path}</code>"
         )
         if loading_msg_id:
-            await edit_msg(chat_id, loading_msg_id, err_text)
+            await edit_msg(chat_id, loading_msg_id, err_msg)
         else:
-            await send_msg(chat_id, err_text)
+            await send_msg(chat_id, err_msg)
+        return
+    except Exception as e:
+        err_msg = f"❌ <b>Eʀʀᴏʀ:</b> <code>{str(e)}</code>"
+        if loading_msg_id:
+            await edit_msg(chat_id, loading_msg_id, err_msg)
+        else:
+            await send_msg(chat_id, err_msg)
         return
 
-    # Double Response
+    if not data or data.get("status") == "error":
+        err_detail = data.get("error", "Unknown API error") if data else "Empty response"
+        err_msg = f"❌ <b>API Eʀʀᴏʀ:</b> <code>{err_detail}</code>"
+        if loading_msg_id:
+            await edit_msg(chat_id, loading_msg_id, err_msg)
+        else:
+            await send_msg(chat_id, err_msg)
+        return
+
+    # If Search or song query: Display rich thumbnail photo card with Audio & Video download buttons
+    if api_label == "Search":
+        vid_id = data.get("id", "")
+        title = data.get("title", "Unknown")
+        dur_str = data.get("duration", "00:00")
+        dur_sec = data.get("duration_sec", 0)
+        uploader = data.get("uploader", "YouTube")
+        yt_url = data.get("youtube_url", f"https://www.youtube.com/watch?v={vid_id}")
+        thumb_url = data.get("thumbnail") or data.get("thumbnail_remote") or f"https://i.ytimg.com/vi/{vid_id}/hqdefault.jpg"
+
+        caption = (
+            f"🎵 <b>{title}</b>\n\n"
+            f"⏱️ <b>Dᴜʀᴀᴛɪᴏɴ:</b> <code>{dur_str}</code> ({dur_sec}s)\n"
+            f"👤 <b>Uᴘʟᴏᴀᴅᴇʀ:</b> <code>{uploader}</code>\n"
+            f"🔗 <b>YᴏᴜTᴜʙᴇ:</b> {yt_url}\n"
+            f"👨‍💻 <b>Dᴇᴠᴇʟᴏᴘᴇʀ:</b> {OWNER_HANDLE}\n\n"
+            f"⚡ <i>Cʟɪᴄᴋ ᴀ ʙᴜᴛᴛᴏɴ ʙᴇʟᴏᴡ ᴛᴏ ᴅᴏᴡɴʟᴏᴀᴅ &amp; ᴜᴘʟᴏᴀᴅ:</i>"
+        )
+        inline_buttons = [
+            [
+                {"text": "🎵 Aᴜᴅɪᴏ", "callback_data": f"btn_dl_audio:{vid_id}"},
+                {"text": "🎬 Vɪᴅᴇᴏ", "callback_data": f"btn_ask_vq:{vid_id}"},
+            ],
+            [
+                {"text": "📄 Vɪᴇᴡ JSOɴ", "callback_data": f"sample_json:search"},
+            ],
+        ]
+
+        if loading_msg_id:
+            await delete_msg(chat_id, loading_msg_id)
+        await send_photo_msg(chat_id, thumb_url, caption, reply_markup={"inline_keyboard": inline_buttons})
+        return
+
+    # Double Response for Playlist / Direct Download API calls
     inline_buttons = []
     if api_label == "Playlist":
         card_text = (
@@ -522,7 +780,7 @@ async def execute_api_test(chat_id: int, input_text: str, forced_mode: Optional[
             f"⏱️ <b>Tɪᴍᴇ:</b> <code>{data.get('elapsed_sec', 0.0)}s</code>\n"
             f"👨‍💻 <b>Dᴇᴠᴇʟᴏᴘᴇʀ:</b> <code>{data.get('developer', OWNER_HANDLE)}</code>\n"
         )
-    elif "download" in endpoint_path or api_label in ("Audio", "Video", "Audio (MP3)", "Video (720p)"):
+    else:
         card_text = (
             f"✅ <b>{api_label.upper()} Rᴇsᴜʟᴛ: Sᴜᴄᴄᴇss</b>\n\n"
             f"🎵 <b>Tɪᴛʟᴇ:</b> <code>{data.get('title', 'Unknown')}</code>\n"
@@ -532,25 +790,6 @@ async def execute_api_test(chat_id: int, input_text: str, forced_mode: Optional[
             f"🔗 <b>Sᴛʀᴇᴀᴍ URL:</b>\n<code>{data.get('stream_url', '')}</code>\n"
             f"👨‍💻 <b>Dᴇᴠᴇʟᴏᴘᴇʀ:</b> <code>{data.get('developer', OWNER_HANDLE)}</code>\n"
         )
-    else:
-        # Search
-        vid_id = data.get("id", "")
-        card_text = (
-            f"🔍 <b>Sᴇᴀʀᴄʜ Rᴇsᴜʟᴛ: Sᴜᴄᴄᴇss</b>\n\n"
-            f"🎵 <b>Tɪᴛʟᴇ:</b> <code>{data.get('title', 'Unknown')}</code>\n"
-            f"⏱️ <b>Dᴜʀᴀᴛɪᴏɴ:</b> <code>{data.get('duration', '00:00')}</code> ({data.get('duration_sec', 0)}s)\n"
-            f"👤 <b>Uᴘʟᴏᴀᴅᴇʀ:</b> <code>{data.get('uploader', 'YouTube')}</code>\n"
-            f"⚡ <b>Sᴘᴇᴇᴅ:</b> <code>{data.get('elapsed_sec', 0.0)}s</code>\n"
-            f"🖼️ <b>Tʜᴜᴍʙɴᴀɪʟ:</b>\n<code>{data.get('thumbnail', '')}</code>\n"
-            f"👨‍💻 <b>Dᴇᴠᴇʟᴏᴘᴇʀ:</b> <code>{data.get('developer', OWNER_HANDLE)}</code>\n"
-        )
-        if vid_id:
-            inline_buttons = [
-                [
-                    {"text": "🎵 Dᴏᴡɴʟᴏᴀᴅ Aᴜᴅɪᴏ", "callback_data": f"dl_direct:audio:{vid_id}"},
-                    {"text": "🎬 Dᴏᴡɴʟᴏᴀᴅ Vɪᴅᴇᴏ", "callback_data": f"dl_direct:video:{vid_id}"},
-                ]
-            ]
 
     # Format JSON safely for Telegram
     json_str = json.dumps(data, indent=2)
@@ -598,11 +837,29 @@ async def handle_callback_query(cq: dict):
         return
 
     # Check Viewer permissions for management tasks
-    if role == "viewer" and not data.startswith(("ip_menu", "sample_json", "test_prompt", "quick_test", "dl_direct")):
+    if role == "viewer" and not data.startswith(("ip_menu", "sample_json", "test_prompt", "quick_test", "dl_direct", "btn_dl_audio", "btn_ask_vq", "dl_vid", "dl_cancel")):
         await send_msg(chat_id, "⚠️ <b>Vɪᴇᴡᴇʀ Rᴏʟᴇ:</b> Yᴏᴜ ʜᴀᴠᴇ ʀᴇᴀᴅ-ᴏɴʟʏ ᴘᴇʀᴍɪssɪᴏɴs.")
         return
 
-    if data.startswith("sample_json:"):
+    # Download & Upload interactive callbacks
+    if data.startswith("btn_dl_audio:"):
+        vid_id = data.split(":", 1)[1]
+        asyncio.create_task(download_and_upload_audio(chat_id, vid_id))
+
+    elif data.startswith("btn_ask_vq:"):
+        vid_id = data.split(":", 1)[1]
+        asyncio.create_task(ask_video_quality(chat_id, vid_id))
+
+    elif data.startswith("dl_vid:"):
+        parts = data.split(":")
+        quality = parts[1]
+        vid_id = parts[2]
+        asyncio.create_task(download_and_upload_video(chat_id, vid_id, quality=quality))
+
+    elif data.startswith("dl_cancel:"):
+        await delete_msg(chat_id, msg.get("message_id"))
+
+    elif data.startswith("sample_json:"):
         ep_type = data.split(":", 1)[1]
         await handle_endpoint_json_sample(chat_id, ep_type)
 
@@ -635,6 +892,7 @@ async def handle_callback_query(cq: dict):
         vid_id = parts[2]
         yt_url = f"https://www.youtube.com/watch?v=eJuoi13hbBc" if not vid_id else f"https://www.youtube.com/watch?v={vid_id}"
         asyncio.create_task(execute_api_test(chat_id, yt_url, forced_mode=mode))
+
 
     elif data.startswith("toggle_block:"):
         ip = data.split(":", 1)[1]
