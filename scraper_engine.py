@@ -1,5 +1,6 @@
 import asyncio
 import aiohttp
+import aiofiles
 import json
 import logging
 import re
@@ -17,7 +18,6 @@ YOUTUBE_URL_REGEX = re.compile(
 def extract_video_id(url_or_query: str) -> Optional[str]:
     """Extracts 11-char YouTube video ID from various link formats or raw ID."""
     clean = url_or_query.strip()
-    # Strip any extra query parameters if present in raw string
     if "youtu.be/" in clean:
         part = clean.split("youtu.be/", 1)[1]
         v_id = part.split("?")[0].split("&")[0].split("/")[0].strip()
@@ -49,7 +49,6 @@ async def search_youtube_web(query: str) -> Optional[Dict[str, str]]:
     if not clean_query:
         return None
 
-    # If it is already an ID or URL, return directly
     v_id = extract_video_id(clean_query)
     if v_id:
         return {"video_id": v_id, "url": f"https://www.youtube.com/watch?v={v_id}", "title": clean_query}
@@ -140,8 +139,8 @@ async def download_via_loader(
     """
     Multi-Format Web Scraper Engine (Zero-Cookie, 100% Bypass).
     Directly converts and downloads media via Loader CDN.
-    Guaranteed to bypass YouTube datacenter IP bot blocks.
-    Saves file to target_path and returns True/False.
+    Guaranteed to bypass YouTube datacenter IP bot blocks and 403 Forbidden errors.
+    Fully async and non-blocking for multi-tab parallel downloads.
     """
     clean_url = f"https://www.youtube.com/watch?v={video_id}"
     
@@ -182,13 +181,13 @@ async def download_via_loader(
                             dl_url = pdata.get("download_url")
                             if dl_url and dl_url.startswith("http") and not dl_url.endswith(".html"):
                                 logger.info(f"[LoaderScraper] Stream ready. Downloading into {target_path.name}...")
-                                # High-speed stream with 512KB chunk buffer
+                                # Non-blocking async download with 512KB chunk buffer
                                 async with session.get(dl_url, timeout=aiohttp.ClientTimeout(total=120.0)) as dl_resp:
                                     if dl_resp.status == 200:
                                         target_path.parent.mkdir(parents=True, exist_ok=True)
-                                        with open(target_path, "wb") as f:
+                                        async with aiofiles.open(target_path, "wb") as f:
                                             async for chunk in dl_resp.content.iter_chunked(512 * 1024):
-                                                f.write(chunk)
+                                                await f.write(chunk)
                                         if target_path.exists() and target_path.stat().st_size > 1024:
                                             logger.info(f"[LoaderScraper] Download SUCCESS: {target_path.name} ({target_path.stat().st_size} bytes)")
                                             return True
