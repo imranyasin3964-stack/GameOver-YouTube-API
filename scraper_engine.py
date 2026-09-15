@@ -93,11 +93,12 @@ async def download_via_loader(
     media_type: str = "audio",
     quality: Optional[str] = None,
     target_path: Optional[Path] = None,
-) -> bool:
+) -> tuple[bool, Optional[str]]:
     """
     Multi-Format Web Scraper Engine (Zero-Cookie, 100% Bypass).
     Directly converts and downloads media via Loader/SaveNow CDN.
     Guaranteed to bypass YouTube datacenter IP bot blocks.
+    Returns: (success: bool, direct_url: Optional[str])
     """
     clean_url = f"https://www.youtube.com/watch?v={video_id}"
     
@@ -118,40 +119,40 @@ async def download_via_loader(
             async with session.get(init_url, timeout=aiohttp.ClientTimeout(total=10.0)) as resp:
                 if resp.status != 200:
                     logger.warning(f"[LoaderScraper] Init failed with status {resp.status}")
-                    return False
+                    return False, None
                 data = await resp.json(content_type=None)
                 if not data.get("success"):
                     logger.warning(f"[LoaderScraper] Server reported unsuccess: {data}")
-                    return False
+                    return False, None
 
                 progress_url = data.get("progress_url")
                 if not progress_url:
-                    return False
+                    return False, None
 
-            # Poll progress URL up to 25 seconds
-            for attempt in range(25):
-                await asyncio.sleep(1.2)
+            # Fast 0.6s polling for rapid link detection
+            for attempt in range(40):
+                await asyncio.sleep(0.6)
                 try:
-                    async with session.get(progress_url, timeout=aiohttp.ClientTimeout(total=6.0)) as resp2:
+                    async with session.get(progress_url, timeout=aiohttp.ClientTimeout(total=5.0)) as resp2:
                         if resp2.status == 200:
                             pdata = await resp2.json(content_type=None)
                             dl_url = pdata.get("download_url")
                             if dl_url and dl_url.startswith("http") and not dl_url.endswith(".html"):
                                 logger.info(f"[LoaderScraper] Stream ready: {dl_url[:60]}... Downloading to {target_path}...")
-                                # Stream file chunks to target_path
+                                # High-speed stream with 512KB chunk buffer
                                 async with session.get(dl_url, timeout=aiohttp.ClientTimeout(total=120.0)) as dl_resp:
                                     if dl_resp.status == 200:
                                         target_path.parent.mkdir(parents=True, exist_ok=True)
                                         with open(target_path, "wb") as f:
-                                            async for chunk in dl_resp.content.iter_chunked(64 * 1024):
+                                            async for chunk in dl_resp.content.iter_chunked(512 * 1024):
                                                 f.write(chunk)
                                         if target_path.exists() and target_path.stat().st_size > 1024:
                                             logger.info(f"[LoaderScraper] Download SUCCESS: {target_path.name} ({target_path.stat().st_size} bytes)")
-                                            return True
+                                            return True, dl_url
                 except Exception as poll_err:
                     logger.debug(f"[LoaderScraper] Poll attempt {attempt} note: {poll_err}")
 
     except Exception as e:
         logger.error(f"[LoaderScraper] Conversion error for {video_id}: {e}")
 
-    return False
+    return False, None

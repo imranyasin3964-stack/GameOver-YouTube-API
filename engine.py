@@ -175,24 +175,25 @@ def download_media_ytdlp_sync(video_id: str, media_type: str = "audio", quality:
     return False
 
 
-async def download_media_async(video_id: str, media_type: str = "audio", quality: Optional[str] = None) -> str:
+async def download_media_async(video_id: str, media_type: str = "audio", quality: Optional[str] = None) -> tuple[str, Optional[str]]:
     """
     Multi-Tier Media Downloader:
     Priority 1: Loader Web Scraper (Zero-Cookie, 100% immune to datacenter bot blocks).
     Priority 2: yt-dlp fallback.
+    Returns: (filename, direct_url)
     """
     filename = get_cache_filename(video_id, media_type)
     target_path = get_cache_path(filename)
 
     if is_cached(filename):
-        return filename
+        return filename, None
 
     # Priority 1: Loader / SaveNow Web Scraper
     logger.info(f"Trying Priority 1 (Loader Web Scraper) for {video_id} [{media_type}]...")
     try:
-        success = await download_via_loader(video_id, media_type, quality, target_path)
+        success, dl_url = await download_via_loader(video_id, media_type, quality, target_path)
         if success and target_path.exists() and target_path.stat().st_size > 1024:
-            return filename
+            return filename, dl_url
     except Exception as e:
         logger.warning(f"Loader scraper attempt failed: {e}")
 
@@ -201,7 +202,7 @@ async def download_media_async(video_id: str, media_type: str = "audio", quality
     try:
         success_ydl = await asyncio.to_thread(download_media_ytdlp_sync, video_id, media_type, quality)
         if success_ydl and target_path.exists():
-            return filename
+            return filename, None
     except Exception as e:
         logger.warning(f"yt-dlp attempt failed: {e}")
 
@@ -218,7 +219,7 @@ async def resolve_and_download(
     1. Resolve metadata (ID, title, duration, thumbnail) via Web Scraper + oEmbed
     2. Check cache (audio_{id}.mp3 or video_{id}.mp4)
     3. If not cached, acquire lock and download via Loader Scraper -> cache
-    4. Return full media payload with stream_url
+    4. Return full media payload with stream_url and youtube_url
     """
     t_start = time.time()
 
@@ -226,6 +227,7 @@ async def resolve_and_download(
     meta = await resolve_metadata_async(query)
     video_id = meta["id"]
     filename = get_cache_filename(video_id, media_type)
+    direct_url = None
 
     # 2. Check cache & Download
     cached = is_cached(filename)
@@ -234,7 +236,7 @@ async def resolve_and_download(
         async with lock:
             if not is_cached(filename):
                 logger.info(f"Downloading [{media_type}] for ID: {video_id} ('{meta['title']}')")
-                await download_media_async(video_id, media_type, quality)
+                _, direct_url = await download_media_async(video_id, media_type, quality)
             cached = False
     else:
         cached = True
@@ -242,7 +244,7 @@ async def resolve_and_download(
     elapsed = round(time.time() - t_start, 2)
     quality_label = f"{quality}p" if media_type.lower() == "video" else "192kbps"
 
-    return {
+    res = {
         "status": "success",
         "id": video_id,
         "title": meta["title"],
@@ -250,9 +252,13 @@ async def resolve_and_download(
         "duration_sec": meta["duration_sec"],
         "thumbnail": meta["thumbnail"],
         "uploader": meta["uploader"],
+        "youtube_url": f"https://www.youtube.com/watch?v={video_id}",
         "type": media_type.lower(),
         "quality": quality_label,
         "filename": filename,
         "cached": cached,
         "elapsed_sec": elapsed,
     }
+    if direct_url:
+        res["direct_url"] = direct_url
+    return res

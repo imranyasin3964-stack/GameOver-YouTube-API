@@ -11,9 +11,9 @@ HOST = os.getenv("API_HOST", "0.0.0.0")
 PORT = int(os.getenv("API_PORT", "80"))
 BASE_URL = os.getenv("BASE_URL", "http://139.162.177.184:80")
 
-# Cache & Storage limits
-MAX_CACHE_SIZE_GB = float(os.getenv("MAX_CACHE_SIZE_GB", "15.0"))  # Auto-cleanup if exceeds 15GB
-CACHE_TTL_HOURS = int(os.getenv("CACHE_TTL_HOURS", "24"))          # Remove files older than 24 hours
+# Cache & Storage limits (7 Days Rolling Retention)
+MAX_CACHE_SIZE_GB = float(os.getenv("MAX_CACHE_SIZE_GB", "20.0"))  # Auto-cleanup oldest files if exceeds 20GB
+CACHE_TTL_HOURS = int(os.getenv("CACHE_TTL_HOURS", str(7 * 24)))    # Keep each song for 7 days (168 hours)
 
 # Downloader / yt-dlp Settings
 DEFAULT_TIMEOUT_SEC = 25
