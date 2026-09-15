@@ -402,119 +402,167 @@ async def extract_playlist_full(playlist_url_or_id: str, max_items: int = 25) ->
     else:
         fetch_url = f"https://www.youtube.com/playlist?list={list_id}"
 
-    async with aiohttp.ClientSession(headers=headers) as session:
-        async with session.get(fetch_url, timeout=aiohttp.ClientTimeout(total=10.0)) as resp:
-            if resp.status != 200:
-                raise RuntimeError(f"Failed to fetch playlist with status {resp.status}")
-            html = await resp.text(errors="ignore")
-
-    m = re.search(r'var ytInitialData = ({.*?});</script>', html) or re.search(r'ytInitialData\s*=\s*({.*?});', html)
-    if not m:
-        raise ValueError(f"Could not retrieve playlist data for ID: {list_id}")
-
-    try:
-        data = json.loads(m.group(1))
-    except Exception as e:
-        raise ValueError(f"Failed to parse playlist JSON: {e}")
-
-    playlist_title = "YouTube Playlist"
-    meta = data.get("metadata", {}).get("playlistMetadataRenderer", {})
-    if meta.get("title"):
-        playlist_title = meta["title"]
-    elif "header" in data:
-        header = data["header"]
-        h_title = (
-            header.get("playlistHeaderRenderer", {}).get("title", {}).get("simpleText")
-            or "".join(r.get("text", "") for r in header.get("playlistHeaderRenderer", {}).get("title", {}).get("runs", []))
-        )
-        if h_title:
-            playlist_title = h_title
-
-    def find_objects(obj, key):
-        if isinstance(obj, dict):
-            if key in obj:
-                yield obj[key]
-            for v in obj.values():
-                yield from find_objects(v, key)
-        elif isinstance(obj, list):
-            for v in obj:
-                yield from find_objects(v, key)
-
     raw_items = []
     seen_ids = set()
+    playlist_title = "YouTube Playlist"
 
-    # 1. Check playlistPanelVideoRenderer (for Mix / Watch playlists)
-    for pvr in find_objects(data, "playlistPanelVideoRenderer"):
-        vid = pvr.get("videoId")
-        if not vid or len(vid) != 11 or vid in seen_ids:
-            continue
-        seen_ids.add(vid)
-        t = "".join(r.get("text", "") for r in pvr.get("title", {}).get("runs", [])) or pvr.get("title", {}).get("simpleText", "")
-        dur = pvr.get("lengthText", {}).get("simpleText", "03:30")
-        owner = "".join(r.get("text", "") for r in pvr.get("shortBylineText", {}).get("runs", [])) or "YouTube"
-        raw_items.append({
-            "id": vid,
-            "title": t,
-            "duration": dur,
-            "duration_sec": parse_duration_to_sec(dur),
-            "uploader": owner,
-            "thumbnail_file": f"thumb_{vid}.jpg",
-            "thumbnail_remote": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
-            "youtube_url": f"https://www.youtube.com/watch?v={vid}",
-        })
-        if len(raw_items) >= max_items:
-            break
+    # 1. Try ultra-fast web scrape first
+    html = ""
+    try:
+        async with aiohttp.ClientSession(headers=headers) as session:
+            async with session.get(fetch_url, timeout=aiohttp.ClientTimeout(total=8.0)) as resp:
+                if resp.status == 200:
+                    html = await resp.text(errors="ignore")
+                else:
+                    logger.warning(f"[Playlist] Web fetch returned status {resp.status} for {fetch_url}")
+    except Exception as e:
+        logger.warning(f"[Playlist] Web fetch exception for {fetch_url}: {e}")
 
-    # 2. Check lockupViewModel (for new YouTube playlist layout)
+    if html:
+        m = re.search(r'var ytInitialData = ({.*?});</script>', html) or re.search(r'ytInitialData\s*=\s*({.*?});', html)
+        if m:
+            try:
+                data = json.loads(m.group(1))
+                meta = data.get("metadata", {}).get("playlistMetadataRenderer", {})
+                if meta.get("title"):
+                    playlist_title = meta["title"]
+                elif "header" in data:
+                    header = data["header"]
+                    h_title = (
+                        header.get("playlistHeaderRenderer", {}).get("title", {}).get("simpleText")
+                        or "".join(r.get("text", "") for r in header.get("playlistHeaderRenderer", {}).get("title", {}).get("runs", []))
+                    )
+                    if h_title:
+                        playlist_title = h_title
+
+                def find_objects(obj, key):
+                    if isinstance(obj, dict):
+                        if key in obj:
+                            yield obj[key]
+                        for v in obj.values():
+                            yield from find_objects(v, key)
+                    elif isinstance(obj, list):
+                        for v in obj:
+                            yield from find_objects(v, key)
+
+                # 1. Check playlistPanelVideoRenderer (for Mix / Watch playlists)
+                for pvr in find_objects(data, "playlistPanelVideoRenderer"):
+                    vid = pvr.get("videoId")
+                    if not vid or len(vid) != 11 or vid in seen_ids:
+                        continue
+                    seen_ids.add(vid)
+                    t = "".join(r.get("text", "") for r in pvr.get("title", {}).get("runs", [])) or pvr.get("title", {}).get("simpleText", "")
+                    dur = pvr.get("lengthText", {}).get("simpleText", "03:30")
+                    owner = "".join(r.get("text", "") for r in pvr.get("shortBylineText", {}).get("runs", [])) or "YouTube"
+                    raw_items.append({
+                        "id": vid,
+                        "title": t,
+                        "duration": dur,
+                        "duration_sec": parse_duration_to_sec(dur),
+                        "uploader": owner,
+                        "thumbnail_file": f"thumb_{vid}.jpg",
+                        "thumbnail_remote": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
+                        "youtube_url": f"https://www.youtube.com/watch?v={vid}",
+                    })
+                    if len(raw_items) >= max_items:
+                        break
+
+                # 2. Check lockupViewModel (for new YouTube playlist layout)
+                if not raw_items:
+                    for lvm in find_objects(data, "lockupViewModel"):
+                        vid = lvm.get("contentId")
+                        if not vid or len(vid) != 11 or vid in seen_ids:
+                            continue
+                        seen_ids.add(vid)
+                        t = lvm.get("metadata", {}).get("lockupMetadataViewModel", {}).get("title", {}).get("content", "")
+                        dur = "03:30"
+                        acc = lvm.get("rendererContext", {}).get("accessibilityContext", {}).get("label", "")
+                        m_dur = re.search(r'(\d+)\s*minutes?(?:,\s*(\d+)\s*seconds?)?', acc)
+                        if m_dur:
+                            mins = int(m_dur.group(1))
+                            secs = int(m_dur.group(2)) if m_dur.group(2) else 0
+                            dur = f"{mins:02d}:{secs:02d}"
+                        raw_items.append({
+                            "id": vid,
+                            "title": t,
+                            "duration": dur,
+                            "duration_sec": parse_duration_to_sec(dur),
+                            "uploader": "YouTube",
+                            "thumbnail_file": f"thumb_{vid}.jpg",
+                            "thumbnail_remote": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
+                            "youtube_url": f"https://www.youtube.com/watch?v={vid}",
+                        })
+                        if len(raw_items) >= max_items:
+                            break
+
+                # 3. Check playlistVideoRenderer (classic playlist layout)
+                if not raw_items:
+                    for pvr in find_objects(data, "playlistVideoRenderer"):
+                        vid = pvr.get("videoId")
+                        if not vid or len(vid) != 11 or vid in seen_ids:
+                            continue
+                        seen_ids.add(vid)
+                        t = "".join(r.get("text", "") for r in pvr.get("title", {}).get("runs", [])) or pvr.get("title", {}).get("simpleText", "")
+                        dur = pvr.get("lengthText", {}).get("simpleText", "03:30")
+                        owner = "".join(r.get("text", "") for r in pvr.get("shortBylineText", {}).get("runs", [])) or "YouTube"
+                        raw_items.append({
+                            "id": vid,
+                            "title": t,
+                            "duration": dur,
+                            "duration_sec": parse_duration_to_sec(dur),
+                            "uploader": owner,
+                            "thumbnail_file": f"thumb_{vid}.jpg",
+                            "thumbnail_remote": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
+                            "youtube_url": f"https://www.youtube.com/watch?v={vid}",
+                        })
+                        if len(raw_items) >= max_items:
+                            break
+            except Exception as e:
+                logger.warning(f"[Playlist] JSON parse warning: {e}")
+
+    # 2. Resilient Fallback: Use High-Speed Innertube Flat Extractor if web scrape hit 429 or returned 0
     if not raw_items:
-        for lvm in find_objects(data, "lockupViewModel"):
-            vid = lvm.get("contentId")
-            if not vid or len(vid) != 11 or vid in seen_ids:
-                continue
-            seen_ids.add(vid)
-            t = lvm.get("metadata", {}).get("lockupMetadataViewModel", {}).get("title", {}).get("content", "")
-            dur = "03:30"
-            acc = lvm.get("rendererContext", {}).get("accessibilityContext", {}).get("label", "")
-            m_dur = re.search(r'(\d+)\s*minutes?(?:,\s*(\d+)\s*seconds?)?', acc)
-            if m_dur:
-                mins = int(m_dur.group(1))
-                secs = int(m_dur.group(2)) if m_dur.group(2) else 0
-                dur = f"{mins:02d}:{secs:02d}"
-            raw_items.append({
-                "id": vid,
-                "title": t,
-                "duration": dur,
-                "duration_sec": parse_duration_to_sec(dur),
-                "uploader": "YouTube",
-                "thumbnail_file": f"thumb_{vid}.jpg",
-                "thumbnail_remote": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
-                "youtube_url": f"https://www.youtube.com/watch?v={vid}",
-            })
-            if len(raw_items) >= max_items:
-                break
-
-    # 3. Check playlistVideoRenderer (classic playlist layout)
-    if not raw_items:
-        for pvr in find_objects(data, "playlistVideoRenderer"):
-            vid = pvr.get("videoId")
-            if not vid or len(vid) != 11 or vid in seen_ids:
-                continue
-            seen_ids.add(vid)
-            t = "".join(r.get("text", "") for r in pvr.get("title", {}).get("runs", [])) or pvr.get("title", {}).get("simpleText", "")
-            dur = pvr.get("lengthText", {}).get("simpleText", "03:30")
-            owner = "".join(r.get("text", "") for r in pvr.get("shortBylineText", {}).get("runs", [])) or "YouTube"
-            raw_items.append({
-                "id": vid,
-                "title": t,
-                "duration": dur,
-                "duration_sec": parse_duration_to_sec(dur),
-                "uploader": owner,
-                "thumbnail_file": f"thumb_{vid}.jpg",
-                "thumbnail_remote": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
-                "youtube_url": f"https://www.youtube.com/watch?v={vid}",
-            })
-            if len(raw_items) >= max_items:
-                break
+        logger.info(f"[Playlist] Activating Innertube flat extractor for {fetch_url}...")
+        try:
+            import yt_dlp
+            ydl_opts = {
+                'extract_flat': True,
+                'skip_download': True,
+                'quiet': True,
+                'no_warnings': True,
+                'playlist_items': f'1-{max_items}',
+            }
+            loop = asyncio.get_event_loop()
+            info = await loop.run_in_executor(None, lambda: yt_dlp.YoutubeDL(ydl_opts).extract_info(fetch_url, download=False))
+            if info:
+                if info.get("title"):
+                    playlist_title = info["title"]
+                entries = info.get("entries", [])
+                for e in entries:
+                    if not e:
+                        continue
+                    vid = e.get("id")
+                    if not vid or len(vid) != 11 or vid in seen_ids:
+                        continue
+                    seen_ids.add(vid)
+                    t = e.get("title") or "Unknown"
+                    dur_s = int(e.get("duration") or 0)
+                    m_val, s_val = dur_s // 60, dur_s % 60
+                    dur_fmt = f"{m_val:02d}:{s_val:02d}"
+                    raw_items.append({
+                        "id": vid,
+                        "title": t,
+                        "duration": dur_fmt,
+                        "duration_sec": dur_s,
+                        "uploader": e.get("uploader") or "YouTube",
+                        "thumbnail_file": f"thumb_{vid}.jpg",
+                        "thumbnail_remote": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
+                        "youtube_url": f"https://www.youtube.com/watch?v={vid}",
+                    })
+                    if len(raw_items) >= max_items:
+                        break
+        except Exception as yt_err:
+            logger.error(f"[Playlist] Innertube flat extractor error: {yt_err}")
 
     if not raw_items:
         raise ValueError(f"No songs found in playlist ID: {list_id}")

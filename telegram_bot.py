@@ -3,6 +3,7 @@ import aiohttp
 import json
 import logging
 import time
+import urllib.parse
 from typing import Optional, Dict, Any, List
 
 import controller_db
@@ -16,14 +17,15 @@ TELEGRAM_API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 OWNER_ID = 6805412676
 OWNER_HANDLE = "@XHamsterFounders"
 
-# Session state for interactive button input (e.g. setting custom limit)
+# Session state for interactive button input (e.g. setting custom limit or test mode)
 USER_STATES: Dict[int, Dict[str, Any]] = {}
 
 
 def get_main_keyboard() -> dict:
-    """Persistent 4/6 Button Grid next to mic with Small-Caps design"""
+    """Persistent 8-Button Grid next to mic with Small-Caps design"""
     return {
         "keyboard": [
+            [{"text": "⚡ API Eɴᴅᴘᴏɪɴᴛs"}, {"text": "🔍 Tᴇsᴛ Sᴇᴀʀᴄʜ"}],
             [{"text": "📊 Sᴛᴀᴛs"}, {"text": "🌐 IPs Lɪsᴛ"}],
             [{"text": "🚫 Bʟᴏᴄᴋ Mᴀɴᴀɢᴇʀ"}, {"text": "⏱️ Lɪᴍɪᴛ Mᴀɴᴀɢᴇʀ"}],
             [{"text": "👥 Aᴅᴍɪɴs"}, {"text": "🧹 Cʟᴇᴀʀ Oʟᴅ Lᴏɢs"}],
@@ -66,6 +68,22 @@ async def send_msg(chat_id: int, text: str, reply_markup: Optional[dict] = None,
             controller_db.track_bot_message(chat_id, msg_id)
         return msg_id
     return None
+
+
+async def edit_msg(chat_id: int, message_id: int, text: str, reply_markup: Optional[dict] = None) -> bool:
+    """Edits an existing Telegram message with HTML formatting"""
+    payload = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+
+    res = await call_tg("editMessageText", payload)
+    return bool(res and res.get("ok"))
 
 
 async def delete_msg(chat_id: int, message_id: int) -> bool:
@@ -224,6 +242,345 @@ async def handle_clear_old_logs(chat_id: int):
     await send_msg(chat_id, f"🧹 <b>Cʟᴇᴀɴᴇᴅ {count} ᴏʟᴅ ʙᴏᴛ ᴍᴇssᴀɢᴇs</b> (older than 24 hours).", reply_markup=get_main_keyboard())
 
 
+async def handle_api_endpoints(chat_id: int):
+    clean_base = BASE_URL.rstrip("/")
+    text = (
+        f"⚡ <b>GᴀᴍᴇOᴠᴇʀ YouTube API Eɴᴅᴘᴏɪɴᴛs</b>\n\n"
+        f"<i>All endpoints run with zero cookies and no web botguard. Tap any URL below to copy:</i>\n\n"
+        f"🎵 <b>1. Aᴜᴅɪᴏ API (MP3 Stream)</b>\n"
+        f"<code>{clean_base}/download?type=audio&amp;url=YOUR_SONG_OR_URL</code>\n"
+        f"<i>Example:</i>\n<code>{clean_base}/download?type=audio&amp;url=tum+hi+ho</code>\n\n"
+        f"🎬 <b>2. Vɪᴅᴇᴏ API (MP4 Stream)</b>\n"
+        f"<code>{clean_base}/download?type=video&amp;quality=720&amp;url=YOUR_SONG_OR_URL</code>\n"
+        f"<i>Qualities: 720, 480, 360</i>\n"
+        f"<i>Example:</i>\n<code>{clean_base}/download?type=video&amp;quality=720&amp;url=fakira</code>\n\n"
+        f"🔍 <b>3. Sᴇᴀʀᴄʜ API (Ultra-Fast 0.3s)</b>\n"
+        f"<code>{clean_base}/search?query=YOUR_QUERY</code>\n"
+        f"<i>Example:</i>\n<code>{clean_base}/search?query=fakira</code>\n\n"
+        f"📑 <b>4. Pʟᴀʏʟɪsᴛ API (25 Songs + Thumbnails)</b>\n"
+        f"<code>{clean_base}/playlist?url=PLAYLIST_URL</code>\n"
+        f"<i>Example:</i>\n<code>{clean_base}/playlist?url=https://youtube.com/playlist?list=RDIuvVVWOsMBo</code>\n\n"
+        f"💡 <i>Tᴀᴘ <b>📄 JSOɴ</b> ʙᴇʟᴏᴡ ᴛᴏ ᴠɪᴇᴡ ʀᴇᴀᴅʏ-ᴛᴏ-ᴄᴏᴘʏ ʀᴇsᴘᴏɴsᴇ ғᴏʀᴍᴀᴛs, ᴏʀ <b>Tᴇsᴛ</b> ᴛᴏ ʀᴜɴ ɪɴsᴛᴀɴᴛʟʏ!</i>"
+    )
+    inline_kb = {
+        "inline_keyboard": [
+            [{"text": "📄 Aᴜᴅɪᴏ JSOɴ", "callback_data": "sample_json:audio"}, {"text": "📄 Vɪᴅᴇᴏ JSOɴ", "callback_data": "sample_json:video"}],
+            [{"text": "📄 Sᴇᴀʀᴄʜ JSOɴ", "callback_data": "sample_json:search"}, {"text": "📄 Pʟᴀʏʟɪsᴛ JSOɴ", "callback_data": "sample_json:playlist"}],
+            [{"text": "🎵 Tᴇsᴛ Aᴜᴅɪᴏ", "callback_data": "test_prompt:audio"}, {"text": "🎬 Tᴇsᴛ Vɪᴅᴇᴏ", "callback_data": "test_prompt:video"}],
+            [{"text": "🔍 Tᴇsᴛ Sᴇᴀʀᴄʜ", "callback_data": "test_prompt:search"}, {"text": "📑 Tᴇsᴛ Pʟᴀʏʟɪsᴛ", "callback_data": "test_prompt:playlist"}],
+        ]
+    }
+    await send_msg(chat_id, text, reply_markup=inline_kb)
+
+
+async def handle_endpoint_json_sample(chat_id: int, ep_type: str):
+    clean_base = BASE_URL.rstrip("/")
+    if ep_type == "audio":
+        sample = {
+            "status": "success",
+            "id": "eJuoi13hbBc",
+            "title": "Fakira - Lyrical | Student Of The Year 2 | Tiger Shroff, Tara & Ananya",
+            "duration": "03:30",
+            "duration_sec": 210,
+            "thumbnail": "https://i.ytimg.com/vi/eJuoi13hbBc/hqdefault.jpg",
+            "uploader": "Zee Music Company",
+            "youtube_url": "https://www.youtube.com/watch?v=eJuoi13hbBc",
+            "type": "audio",
+            "quality": "320k",
+            "filename": "audio_eJuoi13hbBc.mp3",
+            "elapsed_sec": 0.45,
+            "stream_url": f"{clean_base}/media/audio_eJuoi13hbBc.mp3",
+            "developer": OWNER_HANDLE,
+        }
+        title = "🎵 Aᴜᴅɪᴏ API Rᴇsᴘᴏɴsᴇ JSOɴ"
+        get_url = f"{clean_base}/download?type=audio&url=tum+hi+ho"
+        test_cb = "quick_test:audio:fakira"
+    elif ep_type == "video":
+        sample = {
+            "status": "success",
+            "id": "eJuoi13hbBc",
+            "title": "Fakira - Lyrical | Student Of The Year 2 | Tiger Shroff, Tara & Ananya",
+            "duration": "03:30",
+            "duration_sec": 210,
+            "thumbnail": "https://i.ytimg.com/vi/eJuoi13hbBc/hqdefault.jpg",
+            "uploader": "Zee Music Company",
+            "youtube_url": "https://www.youtube.com/watch?v=eJuoi13hbBc",
+            "type": "video",
+            "quality": "720p",
+            "filename": "video_eJuoi13hbBc.mp4",
+            "elapsed_sec": 0.94,
+            "stream_url": f"{clean_base}/media/video_eJuoi13hbBc.mp4",
+            "developer": OWNER_HANDLE,
+        }
+        title = "🎬 Vɪᴅᴇᴏ API (720p) Rᴇsᴘᴏɴsᴇ JSOɴ"
+        get_url = f"{clean_base}/download?type=video&quality=720&url=fakira"
+        test_cb = "quick_test:video:fakira"
+    elif ep_type == "search":
+        sample = {
+            "status": "success",
+            "id": "eJuoi13hbBc",
+            "title": "Fakira - Lyrical | Student Of The Year 2",
+            "duration": "03:30",
+            "duration_sec": 210,
+            "thumbnail": f"{clean_base}/media/thumb_eJuoi13hbBc.jpg",
+            "thumbnail_local": f"{clean_base}/media/thumb_eJuoi13hbBc.jpg",
+            "thumbnail_remote": "https://i.ytimg.com/vi/eJuoi13hbBc/hqdefault.jpg",
+            "uploader": "Zee Music Company",
+            "youtube_url": "https://www.youtube.com/watch?v=eJuoi13hbBc",
+            "results": [
+                {
+                    "id": "eJuoi13hbBc",
+                    "title": "Fakira - Lyrical | Student Of The Year 2",
+                    "duration": "03:30",
+                    "duration_sec": 210,
+                    "thumbnail": f"{clean_base}/media/thumb_eJuoi13hbBc.jpg",
+                    "uploader": "Zee Music Company",
+                    "youtube_url": "https://www.youtube.com/watch?v=eJuoi13hbBc"
+                }
+            ],
+            "elapsed_sec": 0.32,
+            "developer": OWNER_HANDLE,
+        }
+        title = "🔍 Sᴇᴀʀᴄʜ API Rᴇsᴘᴏɴsᴇ JSOɴ"
+        get_url = f"{clean_base}/search?query=fakira"
+        test_cb = "quick_test:search:fakira"
+    else:
+        sample = {
+            "status": "success",
+            "playlist_id": "RDIuvVVWOsMBo",
+            "playlist_title": "YouTube Playlist",
+            "total_items": 25,
+            "items": [
+                {
+                    "index": 1,
+                    "id": "IuvVVWOsMBo",
+                    "title": "Ek Toh Kum Zindagani",
+                    "duration": "03:45",
+                    "duration_sec": 225,
+                    "thumbnail": f"{clean_base}/media/thumb_IuvVVWOsMBo.jpg",
+                    "thumbnail_local": f"{clean_base}/media/thumb_IuvVVWOsMBo.jpg",
+                    "thumbnail_remote": "https://i.ytimg.com/vi/IuvVVWOsMBo/hqdefault.jpg",
+                    "uploader": "T-Series",
+                    "youtube_url": "https://www.youtube.com/watch?v=IuvVVWOsMBo"
+                }
+            ],
+            "indexes": {
+                "index_1": {
+                    "index": 1,
+                    "id": "IuvVVWOsMBo",
+                    "title": "Ek Toh Kum Zindagani",
+                    "duration": "03:45",
+                    "duration_sec": 225,
+                    "thumbnail": f"{clean_base}/media/thumb_IuvVVWOsMBo.jpg",
+                    "uploader": "T-Series",
+                    "youtube_url": "https://www.youtube.com/watch?v=IuvVVWOsMBo"
+                }
+            },
+            "elapsed_sec": 1.15,
+            "developer": OWNER_HANDLE,
+        }
+        title = "📑 Pʟᴀʏʟɪsᴛ API Rᴇsᴘᴏɴsᴇ JSOɴ"
+        get_url = f"{clean_base}/playlist?url=https://youtube.com/playlist?list=RDIuvVVWOsMBo"
+        test_cb = "quick_test:playlist:RDIuvVVWOsMBo"
+
+    json_code = json.dumps(sample, indent=2)
+    escaped_url = get_url.replace("&", "&amp;")
+    text = (
+        f"<b>{title}</b>\n\n"
+        f"🔗 <b>GET URL (Tᴀᴘ ᴛᴏ Cᴏᴘʏ):</b>\n"
+        f"<code>{escaped_url}</code>\n\n"
+        f"📄 <b>Rᴇsᴘᴏɴsᴇ JSOɴ (Cᴏᴘʏᴀʙʟᴇ):</b>\n"
+        f"<pre><code class=\"language-json\">{json_code}</code></pre>"
+    )
+    test_btn = {"text": f"🚀 Tᴇsᴛ {ep_type.capitalize()} Nᴏᴡ", "callback_data": test_cb}
+    await send_msg(chat_id, text, reply_markup={"inline_keyboard": [[test_btn]]})
+
+
+async def handle_test_search_menu(chat_id: int):
+    clean_base = BASE_URL.rstrip("/")
+    text = (
+        f"🔍 <b>API Tᴇsᴛᴇʀ &amp; Sᴇᴀʀᴄʜ Rᴜɴɴᴇʀ</b>\n\n"
+        f"Yᴏᴜ ᴄᴀɴ ᴛᴇsᴛ ᴀɴʏ API ʀɪɢʜᴛ ʜᴇʀᴇ ᴡɪᴛʜᴏᴜᴛ ᴏᴘᴇɴɪɴɢ Cʜʀᴏᴍᴇ!\n\n"
+        f"👉 <b>Jᴜsᴛ sᴇɴᴅ ᴀɴʏ ᴏғ ᴛʜᴇ ғᴏʟʟᴏᴡɪɴɢ ɪɴ ᴄʜᴀᴛ:</b>\n"
+        f"• <b>Sᴏɴɢ Nᴀᴍᴇ:</b> <code>Fakira Student Of The Year</code>\n"
+        f"• <b>YᴏᴜTᴜʙᴇ Lɪɴᴋ:</b> <code>https://www.youtube.com/watch?v=eJuoi13hbBc</code>\n"
+        f"• <b>Pʟᴀʏʟɪsᴛ Lɪɴᴋ:</b> <code>https://youtube.com/playlist?list=RDIuvVVWOsMBo</code>\n"
+        f"• <b>API Lɪɴᴋ:</b> <code>{clean_base}/playlist?url=...</code>\n\n"
+        f"⚡ <i>Oʀ ᴛᴀᴘ ᴀ ǫᴜɪᴄᴋ ᴛᴇsᴛ ʙᴜᴛᴛᴏɴ ʙᴇʟᴏᴡ ᴛᴏ ʀᴜɴ ᴀɴ ɪɴsᴛᴀɴᴛ ᴛᴇsᴛ:</i>"
+    )
+    inline_kb = {
+        "inline_keyboard": [
+            [{"text": "🎵 Quick Audio (Fakira)", "callback_data": "quick_test:audio:fakira"}, {"text": "🎬 Quick Video (Fakira)", "callback_data": "quick_test:video:fakira"}],
+            [{"text": "🔍 Quick Search (Fakira)", "callback_data": "quick_test:search:fakira"}, {"text": "📑 Quick Playlist", "callback_data": "quick_test:playlist:RDIuvVVWOsMBo"}],
+        ]
+    }
+    await send_msg(chat_id, text, reply_markup=inline_kb)
+
+
+async def execute_api_test(chat_id: int, input_text: str, forced_mode: Optional[str] = None):
+    input_text = input_text.strip()
+    if not input_text:
+        return
+
+    # Send immediate Searching status message
+    loading_msg_id = await send_msg(chat_id, "🔍 <b>Sᴇᴀʀᴄʜɪɴɢ... Pʟᴇᴀsᴇ ᴡᴀɪᴛ...</b>")
+
+    api_label = "Search"
+    endpoint_path = ""
+
+    # Case 1: User pasted a full HTTP/HTTPS URL
+    if input_text.startswith("http://") or input_text.startswith("https://"):
+        parsed = urllib.parse.urlparse(input_text)
+        if "/playlist" in parsed.path:
+            api_label = "Playlist"
+            endpoint_path = f"{parsed.path}?{parsed.query}"
+        elif "/download" in parsed.path:
+            api_label = "Video" if "type=video" in parsed.query else "Audio"
+            endpoint_path = f"{parsed.path}?{parsed.query}"
+        elif "/search" in parsed.path:
+            api_label = "Search"
+            endpoint_path = f"{parsed.path}?{parsed.query}"
+        elif "youtube.com/playlist" in input_text or "list=" in input_text:
+            api_label = "Playlist"
+            endpoint_path = f"/playlist?url={urllib.parse.quote(input_text, safe='')}"
+        else:
+            if forced_mode == "video":
+                api_label = "Video (720p)"
+                endpoint_path = f"/download?type=video&quality=720&url={urllib.parse.quote(input_text, safe='')}"
+            elif forced_mode == "audio":
+                api_label = "Audio (MP3)"
+                endpoint_path = f"/download?type=audio&url={urllib.parse.quote(input_text, safe='')}"
+            else:
+                api_label = "Search"
+                endpoint_path = f"/search?query={urllib.parse.quote(input_text, safe='')}"
+    else:
+        # Case 2: Song query
+        if forced_mode == "video":
+            api_label = "Video (720p)"
+            endpoint_path = f"/download?type=video&quality=720&url={urllib.parse.quote(input_text, safe='')}"
+        elif forced_mode == "audio":
+            api_label = "Audio (MP3)"
+            endpoint_path = f"/download?type=audio&url={urllib.parse.quote(input_text, safe='')}"
+        elif forced_mode == "playlist":
+            api_label = "Playlist"
+            endpoint_path = f"/playlist?url={urllib.parse.quote(input_text, safe='')}"
+        else:
+            api_label = "Search"
+            endpoint_path = f"/search?query={urllib.parse.quote(input_text, safe='')}"
+
+    local_target = f"http://127.0.0.1:{PORT}{endpoint_path}"
+    data = None
+    status_code = 0
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.get(local_target, timeout=aiohttp.ClientTimeout(total=45.0)) as resp:
+                    status_code = resp.status
+                    data = await resp.json()
+            except (aiohttp.ClientConnectorError, aiohttp.ServerDisconnectedError):
+                remote_target = f"{BASE_URL.rstrip('/')}{endpoint_path}"
+                async with session.get(remote_target, timeout=aiohttp.ClientTimeout(total=45.0)) as resp:
+                    status_code = resp.status
+                    data = await resp.json()
+
+    except asyncio.TimeoutError:
+        err_text = "⏱️ <b>API Tɪᴍᴇᴏᴜᴛ:</b> Tʜᴇ sᴇʀᴠᴇʀ ᴛᴏᴏᴋ ʟᴏɴɢᴇʀ ᴛʜᴀɴ 45s ᴛᴏ ʀᴇsᴘᴏɴᴅ."
+        if loading_msg_id:
+            await edit_msg(chat_id, loading_msg_id, err_text)
+        else:
+            await send_msg(chat_id, err_text)
+        return
+    except Exception as e:
+        err_text = f"❌ <b>API Rᴇǫᴜᴇsᴛ Fᴀɪʟᴇᴅ:</b> <code>{str(e)}</code>"
+        if loading_msg_id:
+            await edit_msg(chat_id, loading_msg_id, err_text)
+        else:
+            await send_msg(chat_id, err_text)
+        return
+
+    if status_code != 200 or not isinstance(data, dict) or data.get("status") == "error":
+        err_msg = data.get("detail") if isinstance(data, dict) else "Unknown error"
+        err_text = (
+            f"❌ <b>API Eʀʀᴏʀ ({status_code})</b>\n\n"
+            f"<b>Eɴᴅᴘᴏɪɴᴛ:</b> <code>{api_label}</code>\n"
+            f"<b>Dᴇᴛᴀɪʟ:</b> <code>{err_msg}</code>"
+        )
+        if loading_msg_id:
+            await edit_msg(chat_id, loading_msg_id, err_text)
+        else:
+            await send_msg(chat_id, err_text)
+        return
+
+    # Double Response
+    inline_buttons = []
+    if api_label == "Playlist":
+        card_text = (
+            f"📑 <b>Pʟᴀʏʟɪsᴛ Rᴇsᴜʟᴛ: Sᴜᴄᴄᴇss</b>\n\n"
+            f"📋 <b>Pʟᴀʏʟɪsᴛ:</b> <code>{data.get('playlist_title', 'YouTube Playlist')}</code>\n"
+            f"🔢 <b>Tᴏᴛᴀʟ Sᴏɴɢs:</b> <code>{data.get('total_items', 0)}</code>\n"
+            f"⏱️ <b>Tɪᴍᴇ:</b> <code>{data.get('elapsed_sec', 0.0)}s</code>\n"
+            f"👨‍💻 <b>Dᴇᴠᴇʟᴏᴘᴇʀ:</b> <code>{data.get('developer', OWNER_HANDLE)}</code>\n"
+        )
+    elif "download" in endpoint_path or api_label in ("Audio", "Video", "Audio (MP3)", "Video (720p)"):
+        card_text = (
+            f"✅ <b>{api_label.upper()} Rᴇsᴜʟᴛ: Sᴜᴄᴄᴇss</b>\n\n"
+            f"🎵 <b>Tɪᴛʟᴇ:</b> <code>{data.get('title', 'Unknown')}</code>\n"
+            f"⏱️ <b>Dᴜʀᴀᴛɪᴏɴ:</b> <code>{data.get('duration', '00:00')}</code>\n"
+            f"📁 <b>Fɪʟᴇ:</b> <code>{data.get('filename', '')}</code>\n"
+            f"⚡ <b>Sᴘᴇᴇᴅ:</b> <code>{data.get('elapsed_sec', 0.0)}s</code>\n"
+            f"🔗 <b>Sᴛʀᴇᴀᴍ URL:</b>\n<code>{data.get('stream_url', '')}</code>\n"
+            f"👨‍💻 <b>Dᴇᴠᴇʟᴏᴘᴇʀ:</b> <code>{data.get('developer', OWNER_HANDLE)}</code>\n"
+        )
+    else:
+        # Search
+        vid_id = data.get("id", "")
+        card_text = (
+            f"🔍 <b>Sᴇᴀʀᴄʜ Rᴇsᴜʟᴛ: Sᴜᴄᴄᴇss</b>\n\n"
+            f"🎵 <b>Tɪᴛʟᴇ:</b> <code>{data.get('title', 'Unknown')}</code>\n"
+            f"⏱️ <b>Dᴜʀᴀᴛɪᴏɴ:</b> <code>{data.get('duration', '00:00')}</code> ({data.get('duration_sec', 0)}s)\n"
+            f"👤 <b>Uᴘʟᴏᴀᴅᴇʀ:</b> <code>{data.get('uploader', 'YouTube')}</code>\n"
+            f"⚡ <b>Sᴘᴇᴇᴅ:</b> <code>{data.get('elapsed_sec', 0.0)}s</code>\n"
+            f"🖼️ <b>Tʜᴜᴍʙɴᴀɪʟ:</b>\n<code>{data.get('thumbnail', '')}</code>\n"
+            f"👨‍💻 <b>Dᴇᴠᴇʟᴏᴘᴇʀ:</b> <code>{data.get('developer', OWNER_HANDLE)}</code>\n"
+        )
+        if vid_id:
+            inline_buttons = [
+                [
+                    {"text": "🎵 Dᴏᴡɴʟᴏᴀᴅ Aᴜᴅɪᴏ", "callback_data": f"dl_direct:audio:{vid_id}"},
+                    {"text": "🎬 Dᴏᴡɴʟᴏᴀᴅ Vɪᴅᴇᴏ", "callback_data": f"dl_direct:video:{vid_id}"},
+                ]
+            ]
+
+    # Format JSON safely for Telegram
+    json_str = json.dumps(data, indent=2)
+    if len(json_str) > 2800:
+        preview_data = dict(data)
+        if "items" in preview_data and isinstance(preview_data["items"], list) and len(preview_data["items"]) > 2:
+            preview_data["items"] = preview_data["items"][:2] + [f"... ({len(data['items'])} items extracted)"]
+        if "indexes" in preview_data and isinstance(preview_data["indexes"], dict) and len(preview_data["indexes"]) > 2:
+            preview_data["indexes"] = {f"index_{k}": preview_data["indexes"][f"index_{k}"] for k in (1, 2) if f"index_{k}" in preview_data["indexes"]}
+            preview_data["indexes"]["..."] = f"(Total {data.get('total_items')} items indexed)"
+        json_display = json.dumps(preview_data, indent=2)
+    else:
+        json_display = json_str
+
+    final_msg = (
+        f"{card_text}\n"
+        f"📄 <b>Rᴇsᴘᴏɴsᴇ JSOɴ (Cʜʀᴏᴍᴇ Bʀᴏᴡsᴇʀ Fᴏʀᴍᴀᴛ):</b>\n"
+        f"<pre><code class=\"language-json\">{json_display}</code></pre>"
+    )
+
+    reply_markup = {"inline_keyboard": inline_buttons} if inline_buttons else None
+    if loading_msg_id:
+        ok = await edit_msg(chat_id, loading_msg_id, final_msg, reply_markup=reply_markup)
+        if not ok:
+            await delete_msg(chat_id, loading_msg_id)
+            await send_msg(chat_id, final_msg, reply_markup=reply_markup)
+    else:
+        await send_msg(chat_id, final_msg, reply_markup=reply_markup)
+
+
 async def handle_callback_query(cq: dict):
     cq_id = cq["id"]
     from_user = cq["from"]
@@ -240,12 +597,46 @@ async def handle_callback_query(cq: dict):
         await send_msg(chat_id, "🚫 <b>Aᴄᴄᴇss Dᴇɴɪᴇᴅ:</b> Yᴏᴜ ᴀʀᴇ ɴᴏᴛ ᴀɴ ᴀᴜᴛʜᴏʀɪᴢᴇᴅ ᴀᴅᴍɪɴ.")
         return
 
-    # Check Viewer permissions
-    if role == "viewer" and not data.startswith("ip_menu"):
+    # Check Viewer permissions for management tasks
+    if role == "viewer" and not data.startswith(("ip_menu", "sample_json", "test_prompt", "quick_test", "dl_direct")):
         await send_msg(chat_id, "⚠️ <b>Vɪᴇᴡᴇʀ Rᴏʟᴇ:</b> Yᴏᴜ ʜᴀᴠᴇ ʀᴇᴀᴅ-ᴏɴʟʏ ᴘᴇʀᴍɪssɪᴏɴs.")
         return
 
-    if data.startswith("toggle_block:"):
+    if data.startswith("sample_json:"):
+        ep_type = data.split(":", 1)[1]
+        await handle_endpoint_json_sample(chat_id, ep_type)
+
+    elif data.startswith("test_prompt:"):
+        mode = data.split(":", 1)[1]
+        USER_STATES[user_id] = {"mode": mode, "expires_at": time.time() + 300}
+        mode_labels = {
+            "audio": "🎵 Aᴜᴅɪᴏ (MP3)",
+            "video": "🎬 Vɪᴅᴇᴏ (720p)",
+            "search": "🔍 Sᴇᴀʀᴄʜ (Fast Meta)",
+            "playlist": "📑 Pʟᴀʏʟɪsᴛ (25 Songs)"
+        }
+        await send_msg(
+            chat_id,
+            f"🎯 <b>Mᴏᴅᴇ Sᴇʟᴇᴄᴛᴇᴅ: {mode_labels.get(mode, mode.upper())}</b>\n\n"
+            f"Sᴇɴᴅ ʏᴏᴜʀ <b>sᴏɴɢ ɴᴀᴍᴇ</b> ᴏʀ <b>URL</b> ɴᴏᴡ ᴛᴏ ᴛᴇsᴛ:"
+        )
+
+    elif data.startswith("quick_test:"):
+        parts = data.split(":")
+        mode = parts[1]
+        query = parts[2]
+        if mode == "playlist":
+            query = "https://youtube.com/playlist?list=RDIuvVVWOsMBo&playnext=1"
+        asyncio.create_task(execute_api_test(chat_id, query, forced_mode=mode))
+
+    elif data.startswith("dl_direct:"):
+        parts = data.split(":")
+        mode = parts[1]
+        vid_id = parts[2]
+        yt_url = f"https://www.youtube.com/watch?v=eJuoi13hbBc" if not vid_id else f"https://www.youtube.com/watch?v={vid_id}"
+        asyncio.create_task(execute_api_test(chat_id, yt_url, forced_mode=mode))
+
+    elif data.startswith("toggle_block:"):
         ip = data.split(":", 1)[1]
         ip_info = controller_db.get_ip_info(ip)
         new_state = not bool(ip_info and ip_info.get("is_blocked"))
@@ -325,11 +716,17 @@ async def handle_message(msg: dict):
     # Button triggers
     if text in ("/start", "/menu", "Cʟɪᴄᴋ Oɴ"):
         welcome = (
-            f"⚡ <b>GᴀᴍᴇOᴠᴇʀ API Lᴏɢs & Cᴏɴᴛʀᴏʟʟᴇʀ</b>\n\n"
+            f"⚡ <b>GᴀᴍᴇOᴠᴇʀ API Lᴏɢs &amp; Cᴏɴᴛʀᴏʟʟᴇʀ</b>\n\n"
             f"Yᴏᴜ ᴀʀᴇ ʟᴏɢɢᴇᴅ ɪɴ ᴀs: <code>{role.upper()}</code>\n"
-            f"Sᴇʟᴇᴄᴛ ᴀɴʏ ᴏᴘᴛɪᴏɴ ғʀᴏᴍ ᴛʜᴇ ᴍᴇɴᴜ ʙᴇʟᴏᴡ ᴛᴏ ᴍᴏɴɪᴛᴏʀ ᴀɴᴅ ᴄᴏɴᴛʀᴏʟ ʏᴏᴜʀ API."
+            f"Sᴇʟᴇᴄᴛ ᴀɴʏ ᴏᴘᴛɪᴏɴ ғʀᴏᴍ ᴛʜᴇ ᴍᴇɴᴜ ʙᴇʟᴏᴡ ᴛᴏ ᴍᴏɴɪᴛᴏʀ, ᴄᴏɴᴛʀᴏʟ, ᴏʀ ᴛᴇsᴛ ʏᴏᴜʀ API."
         )
         await send_msg(chat_id, welcome, reply_markup=get_main_keyboard(), track=False)
+
+    elif text in ("⚡ API Eɴᴅᴘᴏɪɴᴛs", "/apis", "/endpoints"):
+        await handle_api_endpoints(chat_id)
+
+    elif text in ("🔍 Tᴇsᴛ Sᴇᴀʀᴄʜ", "/test", "/tester", "/search_menu"):
+        await handle_test_search_menu(chat_id)
 
     elif text == "📊 Sᴛᴀᴛs":
         await handle_stats(chat_id)
@@ -393,6 +790,41 @@ async def handle_message(msg: dict):
             await send_msg(chat_id, f"✅ Aᴅᴍɪɴ <code>{new_uid}</code> ᴀᴅᴅᴇᴅ ᴀs <b>{new_role.upper()}</b>!")
         else:
             await send_msg(chat_id, "Usage: <code>/addadmin &lt;user_id&gt; [viewer|editor]</code>")
+
+    # Explicit Slash Test Commands
+    elif text.startswith("/audio"):
+        q = text.split(" ", 1)[1].strip() if " " in text else ""
+        if q:
+            asyncio.create_task(execute_api_test(chat_id, q, forced_mode="audio"))
+        else:
+            await send_msg(chat_id, "Usage: <code>/audio &lt;song name or URL&gt;</code>")
+
+    elif text.startswith("/video"):
+        q = text.split(" ", 1)[1].strip() if " " in text else ""
+        if q:
+            asyncio.create_task(execute_api_test(chat_id, q, forced_mode="video"))
+        else:
+            await send_msg(chat_id, "Usage: <code>/video &lt;song name or URL&gt;</code>")
+
+    elif text.startswith("/search"):
+        q = text.split(" ", 1)[1].strip() if " " in text else ""
+        if q:
+            asyncio.create_task(execute_api_test(chat_id, q, forced_mode="search"))
+        else:
+            await send_msg(chat_id, "Usage: <code>/search &lt;query&gt;</code>")
+
+    elif text.startswith("/playlist"):
+        q = text.split(" ", 1)[1].strip() if " " in text else ""
+        if q:
+            asyncio.create_task(execute_api_test(chat_id, q, forced_mode="playlist"))
+        else:
+            await send_msg(chat_id, "Usage: <code>/playlist &lt;playlist URL&gt;</code>")
+
+    else:
+        # Fallback: User typed a song name or pasted an API / YouTube URL
+        user_state = USER_STATES.pop(user_id, None)
+        mode = user_state.get("mode") if user_state else None
+        asyncio.create_task(execute_api_test(chat_id, text, forced_mode=mode))
 
 
 async def auto_pruner_task():
