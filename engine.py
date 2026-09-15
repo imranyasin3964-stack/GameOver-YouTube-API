@@ -147,6 +147,6 @@ async def resolve_and_download(
         "type": media_type.lower(),
         "quality": quality_label,
         "filename": filename,
-        "cached": cached,
         "elapsed_sec": elapsed,
+        "_cached": cached,
     }

@@ -271,11 +271,13 @@ async def download_media(
         )
 
     filename = result["filename"]
+    is_cached_status = result.pop("_cached", False)
     
     # Determine base url from request or config
     req_base = str(request.base_url).rstrip("/")
     stream_url = f"{req_base}/media/{filename}"
     result["stream_url"] = stream_url
+    result["developer"] = "@XHamsterFounders"
 
     # Broadcast log to Telegram Bot admins
     elapsed = round(time.time() - start_time_req, 2)
@@ -284,7 +286,7 @@ async def download_media(
         "query": clean_query,
         "type": media_type,
         "quality": quality or "default",
-        "cached": result.get("cached", False),
+        "cached": is_cached_status,
         "elapsed_sec": elapsed,
         "title": result.get("title", clean_query),
         "response": result
