@@ -531,6 +531,11 @@ async def extract_playlist_full(playlist_url_or_id: str, max_items: int = 25) ->
                 'quiet': True,
                 'no_warnings': True,
                 'playlist_items': f'1-{max_items}',
+                'extractor_args': {
+                    'youtube': {
+                        'player_client': ['android', 'ios', 'tv']
+                    }
+                }
             }
             loop = asyncio.get_event_loop()
             info = await loop.run_in_executor(None, lambda: yt_dlp.YoutubeDL(ydl_opts).extract_info(fetch_url, download=False))

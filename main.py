@@ -31,18 +31,40 @@ try:
 except Exception:
     pass
 
+# Filter out automated internet vulnerability scanner spam (.env, .git, php, etc.)
+class IgnoreScannersFilter(logging.Filter):
+    SCANNER_PATTERNS = (
+        ".env", ".git", ".docker", ".aws", "cgi-bin", ".php", "wp-", "xmlrpc",
+        "shell", "setup.cgi", "actuator", "owa", "mail", "backup", "pma", "myadmin"
+    )
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage().lower()
+        if "404" in msg:
+            for pat in self.SCANNER_PATTERNS:
+                if pat in msg:
+                    return False
+        return True
+
+scanner_filter = IgnoreScannersFilter()
+
 # Setup root logger for both console and logs.txt with fresh write mode ('w')
 file_handler = logging.FileHandler(str(LOGS_FILE), mode="w", encoding="utf-8")
 file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+file_handler.addFilter(scanner_filter)
 
 console_handler = logging.StreamHandler()
 console_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+console_handler.addFilter(scanner_filter)
 
 root_logger = logging.getLogger()
 root_logger.setLevel(logging.INFO)
 root_logger.handlers.clear()
 root_logger.addHandler(console_handler)
 root_logger.addHandler(file_handler)
+
+# Suppress Uvicorn access logger from printing 404 scanner probes
+logging.getLogger("uvicorn.access").addFilter(scanner_filter)
 
 logger = logging.getLogger("GameOverAPI")
 
@@ -51,6 +73,19 @@ app = FastAPI(
     description="High-Speed Dedicated Private YouTube Audio & Video Engine for Telegram Music Bots",
     version="2.0.0",
 )
+
+# Known vulnerability scanner probes to drop instantly
+SCANNER_PATH_PATTERNS = (
+    ".env", ".git", ".docker", ".aws", "cgi-bin", ".php", "wp-", "xmlrpc",
+    "shell", "setup.cgi", "actuator", "owa", "mail", "backup", "pma", "myadmin"
+)
+
+@app.middleware("http")
+async def anti_scanner_shield_middleware(request: Request, call_next):
+    path = request.url.path.lower()
+    if any(pat in path for pat in SCANNER_PATH_PATTERNS):
+        return Response(status_code=404, content=b"")
+    return await call_next(request)
 
 app.add_middleware(
     CORSMiddleware,
