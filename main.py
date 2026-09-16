@@ -279,6 +279,18 @@ async def search_media(
             detail="Missing required query parameter: 'query' (e.g. /search?query=fakira)"
         )
 
+    client_ip = request.client.host if request.client else "127.0.0.1"
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        client_ip = forwarded.split(",")[0].strip()
+
+    allowed, is_blocked, msg = check_and_increment_ip(client_ip)
+    if not allowed:
+        if is_blocked:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=msg)
+        else:
+            raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=msg)
+
     clean_query = target.strip()
     t_start = time.time()
 
@@ -325,6 +337,20 @@ async def search_media(
         "elapsed_sec": elapsed,
         "developer": "@XHamsterFounders",
     }
+
+    # Broadcast search log to Telegram bot
+    log_data = {
+        "ip": client_ip,
+        "query": clean_query,
+        "type": "search",
+        "quality": "fast",
+        "cached": False,
+        "elapsed_sec": elapsed,
+        "title": primary["title"],
+        "response": response_payload
+    }
+    asyncio.create_task(broadcast_api_log(log_data))
+
     return JSONResponse(content=response_payload)
 
 
@@ -359,11 +385,24 @@ async def playlist_media(
             detail="Missing required query parameter: 'url' or 'list' (e.g. /playlist?url=https://youtube.com/playlist?list=...)"
         )
 
+    client_ip = request.client.host if request.client else "127.0.0.1"
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        client_ip = forwarded.split(",")[0].strip()
+
+    allowed, is_blocked, msg = check_and_increment_ip(client_ip)
+    if not allowed:
+        if is_blocked:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=msg)
+        else:
+            raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=msg)
+
+    clean_target = target.strip()
     t_start = time.time()
     try:
-        pl_data = await extract_playlist_full(target.strip(), max_items=limit)
+        pl_data = await extract_playlist_full(clean_target, max_items=limit)
     except Exception as e:
-        logger.error(f"Playlist extraction failed for '{target}': {e}", exc_info=True)
+        logger.error(f"Playlist extraction failed for '{clean_target}': {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to extract YouTube playlist: {str(e)}"
@@ -401,6 +440,28 @@ async def playlist_media(
         "elapsed_sec": elapsed,
         "developer": "@XHamsterFounders",
     }
+
+    # Broadcast playlist log to Telegram bot
+    log_data = {
+        "ip": client_ip,
+        "query": clean_target,
+        "type": "playlist",
+        "quality": f"{len(formatted_items)} items",
+        "cached": False,
+        "elapsed_sec": elapsed,
+        "title": pl_data.get("playlist_title", "YouTube Playlist"),
+        "response": {
+            "status": "success",
+            "playlist_id": pl_data["playlist_id"],
+            "playlist_title": pl_data["playlist_title"],
+            "total_items": len(formatted_items),
+            "sample_song": formatted_items[0]["title"] if formatted_items else "None",
+            "elapsed_sec": elapsed,
+            "developer": "@XHamsterFounders"
+        }
+    }
+    asyncio.create_task(broadcast_api_log(log_data))
+
     return JSONResponse(content=response_payload)
 
 

@@ -328,16 +328,31 @@ async def broadcast_api_log(log_data: dict):
     elapsed = log_data.get("elapsed_sec", 0.0)
     title = log_data.get("title", query)
 
-    # Format copyable monospace JSON payload (limited to 500 chars)
+    # Format type line with appropriate icon and label
+    m_type_lower = m_type.lower()
+    if m_type_lower == "search":
+        type_icon = "🔍"
+        type_label = "Sᴇᴀʀᴄʜ (Fast Meta)"
+    elif m_type_lower == "playlist":
+        type_icon = "📑"
+        type_label = f"Pʟᴀʏʟɪsᴛ ({quality})"
+    elif m_type_lower == "video":
+        type_icon = "🎬"
+        type_label = f"Vɪᴅᴇᴏ ({quality})"
+    else:
+        type_icon = "🎵"
+        type_label = f"Aᴜᴅɪᴏ ({quality})"
+
+    # Format copyable monospace JSON payload (limited to 750 chars)
     json_str = json.dumps(log_data.get("response", {}), indent=2)
-    if len(json_str) > 700:
-        json_str = json_str[:700] + "\n  ...\n}"
+    if len(json_str) > 750:
+        json_str = json_str[:750] + "\n  ...\n}"
 
     text = (
         f"🚀 <b>Nᴇᴡ API Rᴇǫᴜᴇsᴛ</b>\n\n"
         f"🌐 <b>IP:</b> <code>{ip}</code>\n"
-        f"🎵 <b>Sᴏɴɢ:</b> <code>{title}</code>\n"
-        f"📁 <b>Tʏᴘᴇ:</b> <code>{m_type} ({quality})</code>\n"
+        f"🎵 <b>Tɪᴛʟᴇ:</b> <code>{title}</code>\n"
+        f"📁 <b>Tʏᴘᴇ:</b> {type_icon} <code>{type_label}</code>\n"
         f"⚡ <b>Cᴀᴄʜᴇᴅ:</b> <code>{cached}</code> | ⏱️ <b>Tɪᴍᴇ:</b> <code>{elapsed}s</code>\n\n"
         f"📄 <b>Rᴇsᴘᴏɴsᴇ JSOɴ:</b>\n"
         f"<pre><code class=\"language-json\">{json_str}</code></pre>"
