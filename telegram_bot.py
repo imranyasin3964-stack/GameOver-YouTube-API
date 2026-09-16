@@ -5,6 +5,7 @@ import json
 import logging
 import time
 import urllib.parse
+import re
 from typing import Optional, Dict, Any, List
 
 import controller_db
@@ -358,7 +359,7 @@ async def broadcast_api_log(log_data: dict):
         f"<pre><code class=\"language-json\">{json_str}</code></pre>"
     )
 
-    # Inline button for instant 1-click IP block
+    # Inline buttons for instant action
     ip_info = controller_db.get_ip_info(ip)
     is_blocked = bool(ip_info and ip_info.get("is_blocked"))
     btn_text = f"✅ Uɴʙʟᴏᴄᴋ {ip}" if is_blocked else f"🚫 Bʟᴏᴄᴋ {ip}"
@@ -366,7 +367,10 @@ async def broadcast_api_log(log_data: dict):
 
     reply_markup = {
         "inline_keyboard": [
-            [{"text": btn_text, "callback_data": btn_cb}],
+            [
+                {"text": btn_text, "callback_data": btn_cb},
+                {"text": "ℹ️ IP Iɴғᴏ", "callback_data": f"ip_menu:{ip}"}
+            ],
             [{"text": f"⏱️ Lɪᴍɪᴛ {ip}", "callback_data": f"select_limit:{ip}"}],
         ]
     }
@@ -377,6 +381,134 @@ async def broadcast_api_log(log_data: dict):
             await send_msg(a["user_id"], text, reply_markup=reply_markup, track=True)
         except Exception as e:
             logger.debug(f"Failed to send log to admin {a['user_id']}: {e}")
+
+
+def get_flag_emoji(country_code: str) -> str:
+    """Converts 2-letter ISO country code into Unicode flag emoji."""
+    if not country_code or len(country_code) != 2:
+        return "🌐"
+    try:
+        return chr(127397 + ord(country_code[0].upper())) + chr(127397 + ord(country_code[1].upper()))
+    except Exception:
+        return "🌐"
+
+
+async def fetch_ip_osint_info(ip: str) -> Optional[dict]:
+    """
+    Fetches comprehensive IP geolocation and network OSINT data from ip-api.com.
+    Zero auth required, ultra-fast 0.15s response time.
+    """
+    url = f"http://ip-api.com/json/{ip}?fields=status,message,country,countryCode,region,regionName,city,zip,lat,lon,timezone,isp,org,as,mobile,proxy,hosting,query"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=5.0)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if data.get("status") == "success":
+                        return data
+    except Exception as e:
+        logger.debug(f"[IP-OSINT] Lookup error for {ip}: {e}")
+    return None
+
+
+async def handle_ip_lookup(chat_id: int, ip_str: str, message_id_to_edit: Optional[int] = None):
+    """
+    Renders high-aesthetic OSINT inspection card for any IP with location, ISP, hosting/proxy flags,
+    and internal API usage database hits.
+    """
+    ip_str = ip_str.strip()
+    if not re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", ip_str):
+        await send_msg(
+            chat_id,
+            "⚠️ <b>Iɴᴠᴀʟɪᴅ IP Aᴅᴅʀᴇss:</b>\nPʟᴇᴀsᴇ ᴘʀᴏᴠɪᴅᴇ ᴀ ᴠᴀʟɪᴅ IPv4.\n<i>Example:</i> <code>/ip 152.55.176.130</code>"
+        )
+        return
+
+    loading_id = None
+    if not message_id_to_edit:
+        loading_id = await send_msg(chat_id, f"🔍 <b>Fᴇᴛᴄʜɪɴɢ OSINT Dᴀᴛᴀ ғᴏʀ</b> <code>{ip_str}</code>...")
+
+    t_start = time.time()
+    info = await fetch_ip_osint_info(ip_str) or {}
+    elapsed = round(time.time() - t_start, 2)
+
+    # Local database record
+    db_info = controller_db.get_ip_info(ip_str) or {}
+    is_blocked = bool(db_info.get("is_blocked"))
+    hits = db_info.get("total_requests", 0)
+    today_hits = db_info.get("today_requests", 0)
+    limit_val = db_info.get("daily_limit", 0)
+    limit_str = "Uɴʟɪᴍɪᴛᴇᴅ" if limit_val == 0 else f"{limit_val}/day"
+    status_str = "🚫 Bʟᴏᴄᴋᴇᴅ" if is_blocked else "✅ Aᴄᴛɪᴠᴇ"
+
+    cc = info.get("countryCode", "")
+    flag = get_flag_emoji(cc)
+    country = info.get("country", "Unknown")
+    region = info.get("regionName", "Unknown")
+    city = info.get("city", "Unknown")
+    zip_code = info.get("zip", "N/A")
+    lat = info.get("lat", 0.0)
+    lon = info.get("lon", 0.0)
+    tz = info.get("timezone", "Unknown")
+    isp = info.get("isp", "Unknown")
+    as_num = info.get("as", "Unknown")
+    org = info.get("org", "Unknown")
+    mobile = "📱 Yᴇs" if info.get("mobile") else "📴 Nᴏ"
+    proxy = "🛡️ Yᴇs (VPN/Proxy)" if info.get("proxy") else "✅ Nᴏ"
+    hosting = "🏢 Yᴇs (Datacenter)" if info.get("hosting") else "🏠 Nᴏ (Residential)"
+
+    card_text = (
+        f"┌ <b>G A M E O V E R</b>\n"
+        f"└ <code>/ip {ip_str}</code>\n\n"
+        f"🌐 <b>IP Iɴsᴘᴇᴄᴛᴏʀ &amp; OSINT Iɴғᴏ</b>\n\n"
+        f"  📍 <b>L O C A T I O N</b>\n"
+        f"• <b>IP:</b> <code>{ip_str}</code>\n"
+        f"• <b>Cᴏᴜɴᴛʀʏ:</b> {flag} <code>{country} ({cc})</code>\n"
+        f"• <b>Rᴇɢɪᴏɴ:</b> <code>{region}</code>\n"
+        f"• <b>Cɪᴛʏ:</b> <code>{city}</code>\n"
+        f"• <b>ZIP:</b> <code>{zip_code}</code>\n"
+        f"• <b>Cᴏᴏʀᴅs:</b> <code>{lat}, {lon}</code>\n"
+        f"• <b>Tɪᴍᴇᴢᴏɴᴇ:</b> <code>{tz}</code>\n\n"
+        f"  📶 <b>N E T W O R K</b>\n"
+        f"• <b>ISP:</b> <code>{isp}</code>\n"
+        f"• <b>Oʀɢ:</b> <code>{org}</code>\n"
+        f"• <b>AS:</b> <code>{as_num}</code>\n\n"
+        f"  ⚡ <b>S E C U R I T Y   F L A G S</b>\n"
+        f"• <b>Mᴏʙɪʟᴇ:</b> {mobile}\n"
+        f"• <b>Pʀᴏxʏ / VPN:</b> {proxy}\n"
+        f"• <b>Hᴏsᴛɪɴɢ / DC:</b> {hosting}\n\n"
+        f"  📊 <b>API H I T S &amp; S T A T U S</b>\n"
+        f"• <b>Sᴛᴀᴛᴜs:</b> <b>{status_str}</b>\n"
+        f"• <b>Tᴏᴛᴀʟ Hɪᴛs:</b> <code>{hits}</code>\n"
+        f"• <b>Tᴏᴅᴀʏ Hɪᴛs:</b> <code>{today_hits}</code>\n"
+        f"• <b>Dᴀɪʟʏ Lɪᴍɪᴛ:</b> <code>{limit_str}</code>\n\n"
+        f"⚡ <b>Rᴇsᴘᴏɴsᴇ Tɪᴍᴇ:</b> <code>{elapsed}s</code>\n"
+        f"👨‍💻 <b>Dᴇᴠᴇʟᴏᴘᴇʀ:</b> {OWNER_HANDLE}"
+    )
+
+    block_btn_text = "✅ Uɴʙʟᴏᴄᴋ IP" if is_blocked else "🚫 Bʟᴏᴄᴋ IP"
+    inline_kb = {
+        "inline_keyboard": [
+            [
+                {"text": block_btn_text, "callback_data": f"toggle_block:{ip_str}"},
+                {"text": "⏱️ Sᴇᴛ Lɪᴍɪᴛ", "callback_data": f"select_limit:{ip_str}"},
+            ],
+            [
+                {"text": "🔄 Rᴇғʀᴇsʜ", "callback_data": f"ip_menu:{ip_str}"},
+                {"text": "🌐 All IPs Lɪsᴛ", "callback_data": "ips_list_menu"},
+            ]
+        ]
+    }
+
+    if message_id_to_edit:
+        await edit_msg(chat_id, message_id_to_edit, card_text, reply_markup=inline_kb)
+    elif loading_id:
+        ok = await edit_msg(chat_id, loading_id, card_text, reply_markup=inline_kb)
+        if not ok:
+            await delete_msg(chat_id, loading_id)
+            await send_msg(chat_id, card_text, reply_markup=inline_kb)
+    else:
+        await send_msg(chat_id, card_text, reply_markup=inline_kb)
 
 
 # Button click & text command handlers
@@ -852,7 +984,7 @@ async def handle_callback_query(cq: dict):
         return
 
     # Check Viewer permissions for management tasks
-    if role == "viewer" and not data.startswith(("ip_menu", "sample_json", "test_prompt", "quick_test", "dl_direct", "btn_dl_audio", "btn_ask_vq", "dl_vid", "dl_cancel")):
+    if role == "viewer" and not data.startswith(("ip_menu", "ips_list_menu", "sample_json", "test_prompt", "quick_test", "dl_direct", "btn_dl_audio", "btn_ask_vq", "dl_vid", "dl_cancel")):
         await send_msg(chat_id, "⚠️ <b>Vɪᴇᴡᴇʀ Rᴏʟᴇ:</b> Yᴏᴜ ʜᴀᴠᴇ ʀᴇᴀᴅ-ᴏɴʟʏ ᴘᴇʀᴍɪssɪᴏɴs.")
         return
 
@@ -916,6 +1048,9 @@ async def handle_callback_query(cq: dict):
         controller_db.set_ip_block(ip, new_state)
         status_txt = "🚫 Bʟᴏᴄᴋᴇᴅ" if new_state else "✅ Uɴʙʟᴏᴄᴋᴇᴅ"
         await send_msg(chat_id, f"🌐 IP <code>{ip}</code> ɪs ɴᴏᴡ <b>{status_txt}</b>!")
+        # If toggled from inside an OSINT inspector card, re-render it
+        if msg.get("message_id"):
+            await handle_ip_lookup(chat_id, ip, message_id_to_edit=msg.get("message_id"))
 
     elif data.startswith("unblock:"):
         ip = data.split(":", 1)[1]
@@ -924,23 +1059,10 @@ async def handle_callback_query(cq: dict):
 
     elif data.startswith("ip_menu:"):
         ip = data.split(":", 1)[1]
-        ip_info = controller_db.get_ip_info(ip) or {}
-        is_bl = bool(ip_info.get("is_blocked"))
-        lim = ip_info.get("daily_limit", 0)
-        hits = ip_info.get("total_requests", 0)
-        today = ip_info.get("today_requests", 0)
+        await handle_ip_lookup(chat_id, ip, message_id_to_edit=msg.get("message_id"))
 
-        text = (
-            f"🌐 <b>IP Iɴsᴘᴇᴄᴛᴏʀ:</b> <code>{ip}</code>\n\n"
-            f"• <b>Sᴛᴀᴛᴜs:</b> {'🚫 Bʟᴏᴄᴋᴇᴅ' if is_bl else '✅ Aᴄᴛɪᴠᴇ'}\n"
-            f"• <b>Tᴏᴛᴀʟ Hɪᴛs:</b> <code>{hits}</code>\n"
-            f"• <b>Tᴏᴅᴀʏ Hɪᴛs:</b> <code>{today}</code>\n"
-            f"• <b>Dᴀɪʟʏ Lɪᴍɪᴛ:</b> <code>{lim if lim > 0 else 'Uɴʟɪᴍɪᴛᴇᴅ'}</code>\n"
-        )
-        block_btn = {"text": f"{'✅ Uɴʙʟᴏᴄᴋ' if is_bl else '🚫 Bʟᴏᴄᴋ'}", "callback_data": f"toggle_block:{ip}"}
-        limit_btn = {"text": "⏱️ Cʜᴀɴɢᴇ Lɪᴍɪᴛ", "callback_data": f"select_limit:{ip}"}
-        reply_markup = {"inline_keyboard": [[block_btn, limit_btn]]}
-        await send_msg(chat_id, text, reply_markup=reply_markup)
+    elif data == "ips_list_menu":
+        await handle_ips_list(chat_id)
 
     elif data.startswith("select_limit:"):
         ip = data.split(":", 1)[1]
@@ -1050,6 +1172,20 @@ async def handle_message(msg: dict):
         else:
             await send_msg(chat_id, "Usage: <code>/limit &lt;ip&gt; &lt;number&gt;</code>")
 
+    # Command: /ip [ip_address]
+    elif text == "/ip":
+        await send_msg(
+            chat_id,
+            "🌐 <b>IP Iɴsᴘᴇᴄᴛᴏʀ &amp; OSINT Tᴏᴏʟ:</b>\n\n"
+            "Sᴇɴᴅ ᴀɴ IP ᴛᴏ ɪɴsᴘᴇᴄᴛ ʟᴏᴄᴀᴛɪᴏɴ, ISP, ʜᴏsᴛɪɴɢ/ᴘʀᴏxʏ ғʟᴀɢs &amp; API ʜɪᴛs.\n\n"
+            "Usage: <code>/ip &lt;ip_address&gt;</code>\n"
+            "<i>Example:</i> <code>/ip 152.55.176.130</code>"
+        )
+
+    elif text.startswith("/ip "):
+        target_ip = text.split(" ", 1)[1].strip()
+        asyncio.create_task(handle_ip_lookup(chat_id, target_ip))
+
     # Command: /addadmin <user_id> <viewer|editor>
     elif text.startswith("/addadmin"):
         if user_id != OWNER_ID:
@@ -1094,6 +1230,11 @@ async def handle_message(msg: dict):
             await send_msg(chat_id, "Usage: <code>/playlist &lt;playlist URL&gt;</code>")
 
     else:
+        # Check if text is a raw IP address
+        if re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", text):
+            asyncio.create_task(handle_ip_lookup(chat_id, text))
+            return
+
         # Fallback: User typed a song name or pasted an API / YouTube URL
         user_state = USER_STATES.pop(user_id, None)
         mode = user_state.get("mode") if user_state else None
