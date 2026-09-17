@@ -93,23 +93,89 @@ async def delete_msg(chat_id: int, message_id: int) -> bool:
     return bool(res and res.get("ok"))
 
 
-async def send_photo_msg(chat_id: int, photo_url: str, caption: str, reply_markup: Optional[dict] = None) -> Optional[int]:
-    """Sends a photo card with caption and buttons. Falls back to text if photo delivery fails."""
-    payload = {
-        "chat_id": chat_id,
-        "photo": photo_url,
-        "caption": caption,
-        "parse_mode": "HTML",
-    }
-    if reply_markup:
-        payload["reply_markup"] = reply_markup
-    res = await call_tg("sendPhoto", payload)
-    if res and res.get("ok"):
-        msg_id = res["result"]["message_id"]
-        controller_db.track_bot_message(chat_id, msg_id)
-        return msg_id
-    # Fallback to text message
-    fallback_text = f"🖼️ <a href=\"{photo_url}\">&#8205;</a>\n{caption}"
+async def send_photo_msg(
+    chat_id: int,
+    photo_url: str,
+    caption: str,
+    reply_markup: Optional[dict] = None,
+    video_id: Optional[str] = None
+) -> Optional[int]:
+    """
+    Guaranteed 16:9 Photo Delivery:
+    1. If local thumbnail file exists on disk in CACHE_DIR, upload directly via multipart/form-data.
+    2. Try YouTube official Google CDN 16:9 MaxRes (https://i.ytimg.com/vi/{id}/maxresdefault.jpg).
+    3. Try YouTube SD/HQ CDN (sddefault.jpg / hqdefault.jpg).
+    4. Try photo_url if it's a valid external HTTPS URL.
+    5. Fallback to text message only as last resort.
+    """
+    # Auto-extract video_id if not provided
+    if not video_id:
+        if "vi/" in photo_url:
+            try:
+                video_id = photo_url.split("vi/")[1].split("/")[0]
+            except Exception:
+                pass
+        elif "thumb_" in photo_url:
+            try:
+                video_id = photo_url.split("thumb_")[1].split(".")[0]
+            except Exception:
+                pass
+
+    # Tier 1: Check local cache on disk (100% reliable multipart upload)
+    if video_id:
+        local_thumb = CACHE_DIR / f"thumb_{video_id}.jpg"
+        if local_thumb.is_file() and local_thumb.stat().st_size > 500:
+            try:
+                url = f"{TELEGRAM_API_URL}/sendPhoto"
+                form = aiohttp.FormData()
+                form.add_field("chat_id", str(chat_id))
+                form.add_field("caption", caption)
+                form.add_field("parse_mode", "HTML")
+                if reply_markup:
+                    form.add_field("reply_markup", json.dumps(reply_markup))
+                with open(local_thumb, "rb") as f:
+                    form.add_field("photo", f, filename=f"thumb_{video_id}.jpg", content_type="image/jpeg")
+                    async with aiohttp.ClientSession() as session:
+                        async with session.post(url, data=form, timeout=aiohttp.ClientTimeout(total=20.0)) as resp:
+                            res = await resp.json()
+                            if res and res.get("ok"):
+                                msg_id = res["result"]["message_id"]
+                                controller_db.track_bot_message(chat_id, msg_id)
+                                return msg_id
+            except Exception as e:
+                logger.debug(f"Local thumbnail multipart upload failed for {video_id}: {e}")
+
+    # Tier 2: Google CDN 16:9 MaxRes, SD, HQ URLs
+    cdn_urls = []
+    if video_id:
+        cdn_urls.extend([
+            f"https://i.ytimg.com/vi/{video_id}/maxresdefault.jpg",
+            f"https://i.ytimg.com/vi/{video_id}/sddefault.jpg",
+            f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg",
+        ])
+    if photo_url and photo_url.startswith("https://") and photo_url not in cdn_urls:
+        cdn_urls.append(photo_url)
+
+    for cdn_u in cdn_urls:
+        try:
+            payload = {
+                "chat_id": chat_id,
+                "photo": cdn_u,
+                "caption": caption,
+                "parse_mode": "HTML",
+            }
+            if reply_markup:
+                payload["reply_markup"] = reply_markup
+            res = await call_tg("sendPhoto", payload)
+            if res and res.get("ok"):
+                msg_id = res["result"]["message_id"]
+                controller_db.track_bot_message(chat_id, msg_id)
+                return msg_id
+        except Exception as e:
+            logger.debug(f"CDN sendPhoto failed for {cdn_u}: {e}")
+
+    # Tier 3: Text fallback
+    fallback_text = f"🎵 {caption}"
     return await send_msg(chat_id, fallback_text, reply_markup=reply_markup)
 
 
@@ -887,7 +953,7 @@ async def execute_api_test(chat_id: int, input_text: str, forced_mode: Optional[
             await send_msg(chat_id, err_msg)
         return
 
-    # If Search or song query: Display rich thumbnail photo card with Audio & Video download buttons
+    # If Search or song query: Display rich 16:9 thumbnail photo card with Audio & Video download buttons
     if api_label == "Search":
         vid_id = data.get("id", "")
         title = data.get("title", "Unknown")
@@ -895,7 +961,7 @@ async def execute_api_test(chat_id: int, input_text: str, forced_mode: Optional[
         dur_sec = data.get("duration_sec", 0)
         uploader = data.get("uploader", "YouTube")
         yt_url = data.get("youtube_url", f"https://www.youtube.com/watch?v={vid_id}")
-        thumb_url = data.get("thumbnail") or data.get("thumbnail_remote") or f"https://i.ytimg.com/vi/{vid_id}/hqdefault.jpg"
+        thumb_url = f"https://i.ytimg.com/vi/{vid_id}/maxresdefault.jpg"
 
         caption = (
             f"🎵 <b>{title}</b>\n\n"
@@ -917,7 +983,7 @@ async def execute_api_test(chat_id: int, input_text: str, forced_mode: Optional[
 
         if loading_msg_id:
             await delete_msg(chat_id, loading_msg_id)
-        await send_photo_msg(chat_id, thumb_url, caption, reply_markup={"inline_keyboard": inline_buttons})
+        await send_photo_msg(chat_id, thumb_url, caption, reply_markup={"inline_keyboard": inline_buttons}, video_id=vid_id)
         return
 
     # Double Response for Playlist / Direct Download API calls
@@ -954,10 +1020,24 @@ async def execute_api_test(chat_id: int, input_text: str, forced_mode: Optional[
     else:
         json_display = json_str
 
+    # If video ID exists, deliver 16:9 photo card first
+    vid_id = data.get("id")
+    if api_label != "Playlist" and vid_id:
+        thumb_url = f"https://i.ytimg.com/vi/{vid_id}/maxresdefault.jpg"
+        if loading_msg_id:
+            await delete_msg(chat_id, loading_msg_id)
+            loading_msg_id = None
+        await send_photo_msg(chat_id, thumb_url, card_text, video_id=vid_id)
+        # Send JSON response
+        await send_msg(
+            chat_id,
+            f"📄 <b>Rᴇsᴘᴏɴsᴇ JSOɴ (Cʜʀᴏᴍᴇ Bʀᴏᴡsᴇʀ Fᴏʀᴍᴀᴛ):</b>\n<pre><code class=\"language-json\">{json_display}</code></pre>"
+        )
+        return
+
     final_msg = (
         f"{card_text}\n"
-        f"📄 <b>Rᴇsᴘᴏɴsᴇ JSOɴ (Cʜʀᴏᴍᴇ Bʀᴏᴡsᴇʀ Fᴏʀᴍᴀᴛ):</b>\n"
-        f"<pre><code class=\"language-json\">{json_display}</code></pre>"
+        f"📄 <b>Rᴇsᴘᴏɴsᴇ JSOɴ (Cʜʀᴏᴍᴇ Bʀᴏᴡsᴇʀ Fᴏʀᴍᴀᴛ):</b>\n<pre><code class=\"language-json\">{json_display}</code></pre>"
     )
 
     reply_markup = {"inline_keyboard": inline_buttons} if inline_buttons else None

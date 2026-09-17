@@ -67,21 +67,29 @@ async def save_thumbnail_local(video_id: str, remote_url: Optional[str] = None) 
     if thumb_path.is_file() and thumb_path.stat().st_size > 500:
         return thumb_name
 
-    target_url = remote_url or f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
+    candidate_urls = []
+    if remote_url:
+        candidate_urls.append(remote_url)
+    candidate_urls.extend([
+        f"https://i.ytimg.com/vi/{video_id}/maxresdefault.jpg",
+        f"https://i.ytimg.com/vi/{video_id}/sddefault.jpg",
+        f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
+    ])
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     }
-    try:
-        async with aiohttp.ClientSession(headers=headers) as session:
-            async with session.get(target_url, timeout=aiohttp.ClientTimeout(total=5.0)) as resp:
-                if resp.status == 200:
-                    thumb_path.parent.mkdir(parents=True, exist_ok=True)
-                    async with aiofiles.open(thumb_path, "wb") as f:
-                        async for chunk in resp.content.iter_chunked(64 * 1024):
-                            await f.write(chunk)
-                    return thumb_name
-    except Exception as e:
-        logger.debug(f"Could not cache thumbnail for {video_id}: {e}")
+    for target_url in candidate_urls:
+        try:
+            async with aiohttp.ClientSession(headers=headers) as session:
+                async with session.get(target_url, timeout=aiohttp.ClientTimeout(total=5.0)) as resp:
+                    if resp.status == 200:
+                        thumb_path.parent.mkdir(parents=True, exist_ok=True)
+                        async with aiofiles.open(thumb_path, "wb") as f:
+                            async for chunk in resp.content.iter_chunked(64 * 1024):
+                                await f.write(chunk)
+                        return thumb_name
+        except Exception as e:
+            logger.debug(f"Could not cache thumbnail from {target_url} for {video_id}: {e}")
 
     return thumb_name
 
