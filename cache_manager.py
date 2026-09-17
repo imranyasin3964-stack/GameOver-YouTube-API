@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 from typing import Optional, Dict, Any
 
-from config import CACHE_DIR, MAX_CACHE_SIZE_GB, CACHE_TTL_HOURS
+from config import CACHE_DIR, MAX_CACHE_SIZE_GB
 
 logger = logging.getLogger("GameOverAPI.Cache")
 
@@ -90,56 +90,119 @@ def get_cache_stats() -> Dict[str, Any]:
         "disk_total_gb": disk_total_gb,
         "disk_used_gb": disk_used_gb,
         "disk_free_gb": disk_free_gb,
+        "max_threshold_gb": MAX_CACHE_SIZE_GB,
+    }
+
+
+_last_limit_alert_time: float = 0.0
+
+
+async def notify_cache_threshold_alert(current_gb: float, max_gb: float, file_count: int):
+    """Sends a Telegram alert to the owner when cache storage hits the 50GB threshold."""
+    global _last_limit_alert_time
+    now = time.time()
+    # Alert at most once every 12 hours to prevent chat spam
+    if now - _last_limit_alert_time < 43200:
+        return
+    _last_limit_alert_time = now
+
+    try:
+        from telegram_bot import send_msg, OWNER_ID
+        stats = get_cache_stats()
+        alert_msg = (
+            f"⚠️ <b>NVMe Cᴀᴄʜᴇ Sᴛᴏʀᴀɢᴇ Tʜʀᴇsʜᴏʟᴅ Aʟᴇʀᴛ!</b>\n\n"
+            f"📦 <b>Cᴜʀʀᴇɴᴛ Cᴀᴄʜᴇ:</b> <code>{current_gb:.2f} GB / {max_gb:.1f} GB</code>\n"
+            f"🎵 <b>Tᴏᴛᴀʟ Fɪʟᴇs:</b> <code>{file_count}</code>\n"
+            f"💽 <b>NVMe Fʀᴇᴇ:</b> <code>{stats.get('disk_free_gb', 0)} GB / {stats.get('disk_total_gb', 0)} GB</code>\n\n"
+            f"ℹ️ <i>Aᴜᴛᴏ-ᴅᴇʟᴇᴛᴇ ɪs ᴅɪsᴀʙʟᴇᴅ ᴘᴇʀ ʏᴏᴜʀ sᴇᴛᴛɪɴɢs. Sᴏɴɢs ᴡɪʟʟ sᴛᴀʏ sᴀᴠᴇᴅ ᴘᴇʀᴍᴀɴᴇɴᴛʟʏ. Yᴏᴜ ᴄᴀɴ ᴍᴀɴᴜᴀʟʟʏ ᴄʟᴇᴀʀ ᴄᴀᴄʜᴇ ɪғ ɴᴇᴇᴅᴇᴅ ᴠɪᴀ ʙᴏᴛ.</i>"
+        )
+        await send_msg(OWNER_ID, alert_msg)
+    except Exception as e:
+        logger.warning(f"Failed to send cache alert to owner: {e}")
+
+
+def check_cache_threshold_sync() -> Dict[str, Any]:
+    """Scans cache size without deleting any files."""
+    total_bytes = 0
+    file_count = 0
+    for entry in CACHE_DIR.iterdir():
+        if entry.is_file():
+            try:
+                total_bytes += entry.stat().st_size
+                file_count += 1
+            except Exception:
+                pass
+    current_gb = round(total_bytes / (1024 ** 3), 2)
+    return {
+        "file_count": file_count,
+        "total_bytes": total_bytes,
+        "current_gb": current_gb,
+        "exceeded": current_gb >= MAX_CACHE_SIZE_GB,
     }
 
 
 def prune_old_cache():
     """
-    Removes files older than CACHE_TTL_HOURS or prunes oldest files
-    if total cache size exceeds MAX_CACHE_SIZE_GB.
+    Permanent Storage Policy:
+    NO automatic 7-day deletion. Songs remain cached permanently.
+    Logs a warning if storage hits MAX_CACHE_SIZE_GB (50 GB).
+    """
+    res = check_cache_threshold_sync()
+    if res["exceeded"]:
+        logger.warning(f"[Cache Storage Alert] NVMe cache ({res['current_gb']} GB) reached {MAX_CACHE_SIZE_GB} GB threshold!")
+
+
+async def cache_cleaner_task():
+    """Periodic background monitor running every 1 hour (Monitoring & Alerts only, NO auto-deletion)"""
+    while True:
+        try:
+            await asyncio.sleep(3600)
+            res = await asyncio.to_thread(check_cache_threshold_sync)
+            if res["exceeded"]:
+                await notify_cache_threshold_alert(res["current_gb"], MAX_CACHE_SIZE_GB, res["file_count"])
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Cache monitor worker error: {e}")
+
+
+def manual_clear_cache(keep_latest_gb: float = 30.0) -> Dict[str, Any]:
+    """
+    Manual cache pruner executed ONLY when user explicitly commands it.
+    Deletes oldest files first until size drops to keep_latest_gb.
     """
     now = time.time()
-    ttl_seconds = CACHE_TTL_HOURS * 3600
-    max_bytes = MAX_CACHE_SIZE_GB * (1024 ** 3)
-
     files = []
     total_bytes = 0
+    deleted_count = 0
+    freed_bytes = 0
 
     for entry in CACHE_DIR.iterdir():
         if entry.is_file():
             try:
                 stat = entry.stat()
-                age = now - stat.st_mtime
-                if age > ttl_seconds:
-                    entry.unlink(missing_ok=True)
-                    logger.info(f"Cleaned expired cache file: {entry.name}")
-                else:
-                    files.append((entry, stat.st_size, stat.st_mtime))
-                    total_bytes += stat.st_size
-            except Exception as e:
-                logger.warning(f"Failed to inspect/delete cache file {entry}: {e}")
+                files.append((entry, stat.st_size, stat.st_mtime))
+                total_bytes += stat.st_size
+            except Exception:
+                pass
 
-    # If cache still exceeds max size, delete oldest files first
-    if total_bytes > max_bytes:
+    target_bytes = keep_latest_gb * (1024 ** 3)
+    if total_bytes > target_bytes:
         files.sort(key=lambda x: x[2])  # Sort by modification time ascending (oldest first)
         for entry, size, _ in files:
             try:
                 entry.unlink(missing_ok=True)
                 total_bytes -= size
-                logger.info(f"Pruned cache to free space: {entry.name}")
-                if total_bytes <= max_bytes * 0.8:  # Prune down to 80%
+                freed_bytes += size
+                deleted_count += 1
+                if total_bytes <= target_bytes:
                     break
             except Exception as e:
-                logger.warning(f"Failed to prune {entry}: {e}")
+                logger.warning(f"Failed to delete {entry}: {e}")
 
-
-async def cache_cleaner_task():
-    """Periodic background worker running every 1 hour"""
-    while True:
-        try:
-            await asyncio.sleep(3600)
-            await asyncio.to_thread(prune_old_cache)
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            logger.error(f"Cache cleaner error: {e}")
+    return {
+        "deleted_count": deleted_count,
+        "freed_mb": round(freed_bytes / (1024 ** 2), 2),
+        "freed_gb": round(freed_bytes / (1024 ** 3), 2),
+        "remaining_gb": round(total_bytes / (1024 ** 3), 2),
+    }

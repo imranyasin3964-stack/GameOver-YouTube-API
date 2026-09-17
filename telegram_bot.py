@@ -1232,6 +1232,21 @@ async def handle_message(msg: dict):
             track=False
         )
 
+    # Command: /clearcache (manual owner-triggered cleanup)
+    elif text in ("/clearcache", "/prunecache"):
+        if user_id != OWNER_ID:
+            await send_msg(chat_id, "⚠️ Oɴʟʏ ᴛʜᴇ Oᴡɴᴇʀ ᴄᴀɴ ᴍᴀɴᴜᴀʟʟʏ ᴄʟᴇᴀʀ ᴄᴀᴄʜᴇ.")
+            return
+        from cache_manager import manual_clear_cache
+        res = manual_clear_cache(keep_latest_gb=30.0)
+        await send_msg(
+            chat_id,
+            f"🧹 <b>Mᴀɴᴜᴀʟ Cᴀᴄʜᴇ Cʟᴇᴀɴᴜᴘ Cᴏᴍᴘʟᴇᴛᴇ</b>\n\n"
+            f"🗑️ <b>Fɪʟᴇs Dᴇʟᴇᴛᴇᴅ:</b> <code>{res['deleted_count']}</code>\n"
+            f"📦 <b>Sᴘᴀᴄᴇ Fʀᴇᴇᴅ:</b> <code>{res['freed_gb']} GB</code>\n"
+            f"💾 <b>Rᴇᴍᴀɪɴɪɴɢ Cᴀᴄʜᴇ:</b> <code>{res['remaining_gb']} GB</code>"
+        )
+
     # Command: /block <ip>
     elif text.startswith("/block"):
         parts = text.split()
