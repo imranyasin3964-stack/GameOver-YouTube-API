@@ -19,7 +19,11 @@ from cache_manager import (
 )
 from engine import resolve_and_download
 from scraper_engine import search_youtube_full, extract_playlist_full
-from controller_db import check_and_increment_ip
+from controller_db import (
+    check_and_increment_ip,
+    scan_and_index_cache_directory,
+    save_query_mapping,
+)
 from telegram_bot import broadcast_api_log
 
 LOGS_FILE = Path(__file__).resolve().parent / "logs.txt"
@@ -105,6 +109,8 @@ async def on_startup():
     logger.info(f"Public Base URL: {BASE_URL}")
     logger.info(f"NVMe Cache Directory: {CACHE_DIR}")
     logger.info("==================================================")
+    # Index pre-existing disk cache into SQLite DB so nothing is re-downloaded
+    scan_and_index_cache_directory(CACHE_DIR)
     # Start background 24h cache cleaner
     asyncio.create_task(cache_cleaner_task())
     # Start background Telegram Controller & Logger Bot
@@ -337,6 +343,11 @@ async def search_media(
         "elapsed_sec": elapsed,
         "developer": "@XHamsterFounders",
     }
+
+    # Map search queries in SQLite database so future /download hits are instant
+    save_query_mapping(clean_query, primary["id"])
+    if primary.get("title"):
+        save_query_mapping(primary["title"], primary["id"])
 
     # Broadcast search log to Telegram bot
     log_data = {

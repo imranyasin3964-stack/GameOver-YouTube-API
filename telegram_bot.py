@@ -24,16 +24,16 @@ USER_STATES: Dict[int, Dict[str, Any]] = {}
 
 
 def get_main_keyboard() -> dict:
-    """Persistent 8-Button Grid next to mic with Small-Caps design"""
+    """Mobile-friendly 9-Button Grid with Close button and non-sticky keyboard"""
     return {
         "keyboard": [
             [{"text": "⚡ API Eɴᴅᴘᴏɪɴᴛs"}, {"text": "🔍 Tᴇsᴛ Sᴇᴀʀᴄʜ"}],
             [{"text": "📊 Sᴛᴀᴛs"}, {"text": "🌐 IPs Lɪsᴛ"}],
             [{"text": "🚫 Bʟᴏᴄᴋ Mᴀɴᴀɢᴇʀ"}, {"text": "⏱️ Lɪᴍɪᴛ Mᴀɴᴀɢᴇʀ"}],
             [{"text": "👥 Aᴅᴍɪɴs"}, {"text": "🧹 Cʟᴇᴀʀ Oʟᴅ Lᴏɢs"}],
+            [{"text": "❌ Cʟᴏsᴇ Mᴇɴᴜ"}],
         ],
         "resize_keyboard": True,
-        "is_persistent": True,
     }
 
 
@@ -515,13 +515,16 @@ async def handle_ip_lookup(chat_id: int, ip_str: str, message_id_to_edit: Option
 async def handle_stats(chat_id: int):
     c_stats = get_cache_stats()
     req_stats = controller_db.get_total_request_stats()
+    db_songs, db_hits = controller_db.get_cached_songs_count()
     
     text = (
         f"📊 <b>GᴀᴍᴇOᴠᴇʀ API Sᴛᴀᴛɪsᴛɪᴄs</b>\n\n"
         f"🌐 <b>Tᴏᴛᴀʟ Cʟɪᴇɴᴛ IPs:</b> <code>{req_stats['total_ips']}</code>\n"
         f"🔥 <b>Tᴏᴛᴀʟ Rᴇǫᴜᴇsᴛs:</b> <code>{req_stats['total_requests']}</code>\n"
         f"🚫 <b>Bʟᴏᴄᴋᴇᴅ IPs:</b> <code>{req_stats['blocked_ips']}</code>\n\n"
-        f"💾 <b>Cᴀᴄʜᴇ Fɪʟᴇs:</b> <code>{c_stats['cached_files_count']}</code>\n"
+        f"🎵 <b>Cᴀᴄʜᴇᴅ Sᴏɴɢs (DB):</b> <code>{db_songs}</code>\n"
+        f"⚡ <b>Iɴsᴛᴀɴᴛ Cᴀᴄʜᴇ Hɪᴛs:</b> <code>{db_hits}</code>\n"
+        f"💾 <b>NVMe Fɪʟᴇs:</b> <code>{c_stats['cached_files_count']}</code>\n"
         f"📦 <b>Cᴀᴄʜᴇ Sɪᴢᴇ:</b> <code>{c_stats['cache_size_mb']} MB</code>\n"
         f"💽 <b>NVMe Fʀᴇᴇ:</b> <code>{c_stats['disk_free_gb']} GB / {c_stats['disk_total_gb']} GB</code>\n"
         f"🚀 <b>Pᴏʀᴛ:</b> <code>{PORT}</code> | <b>Bᴀsᴇ:</b> <code>{BASE_URL}</code>"
@@ -1140,6 +1143,14 @@ async def handle_message(msg: dict):
 
     elif text == "🧹 Cʟᴇᴀʀ Oʟᴅ Lᴏɢs":
         await handle_clear_old_logs(chat_id)
+
+    elif text in ("❌ Cʟᴏsᴇ Mᴇɴᴜ", "/close", "close", "Close"):
+        await send_msg(
+            chat_id,
+            "✖️ <b>Mᴇɴᴜ Cʟᴏsᴇᴅ.</b>\nTʏᴘᴇ /start ᴏʀ /menu ᴛᴏ ᴏᴘᴇɴ ᴀᴛ ᴀɴʏ ᴛɪᴍᴇ.",
+            reply_markup={"remove_keyboard": True},
+            track=False
+        )
 
     # Command: /block <ip>
     elif text.startswith("/block"):

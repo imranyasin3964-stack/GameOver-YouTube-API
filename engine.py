@@ -8,6 +8,7 @@ from pathlib import Path
 
 from config import CACHE_DIR, DEFAULT_TIMEOUT_SEC
 from cache_manager import get_cache_filename, get_cache_path, is_cached, get_download_lock
+import controller_db
 from scraper_engine import (
     extract_video_id,
     search_youtube_web,
@@ -108,14 +109,96 @@ async def resolve_and_download(
     quality: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    Main entry point:
-    1. Resolve metadata in 0.2s via zero-cookie Web Scraper & oEmbed
-    2. Check cache
-    3. Download media into NVMe cache concurrently in parallel
-    4. Return clean JSON (NO third-party direct_url, only internal stream_url)
+    Main entry point with instant sub-millisecond cache returns:
+    1. Check if query is a video ID, URL, or mapped song title in SQLite database.
+    2. If file already exists on NVMe disk and metadata in DB: Return in 0.001s!
+    3. If file not on disk: Resolve metadata, download, and register into DB for future instant hits.
     """
     t_start = time.time()
+    clean = query.strip()
+    media_type = "video" if media_type.lower() == "video" else "audio"
+    quality_label = f"{quality}p" if media_type == "video" else "192kbps"
 
+    # Step 1: Direct video ID extraction (e.g. from YouTube URL or raw 11-char ID)
+    video_id = extract_video_id(clean)
+
+    # Step 2: Query lookup in SQLite database (e.g. 'fakira' -> 'eJuoi13hbBc')
+    if not video_id:
+        video_id = controller_db.get_video_id_by_query(clean)
+
+    # Step 3: Fast Disk & Database Cache Check
+    if video_id:
+        filename = get_cache_filename(video_id, media_type)
+        if is_cached(filename):
+            db_media = controller_db.get_media_cache(video_id)
+            if db_media and db_media.get("title") and not db_media["title"].startswith("YouTube Audio ("):
+                # Save query mapping so next search hits immediately
+                if clean != video_id and not clean.startswith("http"):
+                    controller_db.save_query_mapping(clean, video_id)
+
+                elapsed = round(time.time() - t_start, 3)
+                logger.info(f"[INSTANT CACHE HIT ⚡] {video_id} ('{db_media['title']}') returned in {elapsed}s")
+                return {
+                    "status": "success",
+                    "id": video_id,
+                    "title": db_media["title"],
+                    "duration": db_media["duration"],
+                    "duration_sec": db_media["duration_sec"],
+                    "thumbnail": db_media["thumbnail"] or f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg",
+                    "uploader": db_media["uploader"] or "YouTube",
+                    "youtube_url": db_media["youtube_url"] or f"https://www.youtube.com/watch?v={video_id}",
+                    "type": media_type,
+                    "quality": quality_label,
+                    "filename": filename,
+                    "elapsed_sec": elapsed,
+                    "_cached": True,
+                }
+            else:
+                # File is already on disk from previous downloads, but DB metadata needs enrichment
+                logger.info(f"[DISK HIT 💽] {filename} exists on disk. Enriching metadata...")
+                try:
+                    meta = await resolve_metadata_async(video_id)
+                except Exception:
+                    meta = {
+                        "id": video_id,
+                        "title": db_media.get("title", f"YouTube {media_type.capitalize()} ({video_id})") if db_media else f"YouTube {media_type.capitalize()} ({video_id})",
+                        "duration": "03:30",
+                        "duration_sec": 210,
+                        "thumbnail": f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg",
+                        "uploader": "YouTube",
+                        "webpage_url": f"https://www.youtube.com/watch?v={video_id}",
+                    }
+                controller_db.save_media_cache(
+                    video_id=video_id,
+                    title=meta["title"],
+                    duration=meta["duration"],
+                    duration_sec=meta["duration_sec"],
+                    thumbnail=meta["thumbnail"],
+                    uploader=meta["uploader"],
+                    youtube_url=meta["webpage_url"],
+                    audio_file=filename if media_type == "audio" else None,
+                    video_file=filename if media_type == "video" else None,
+                )
+                if clean != video_id and not clean.startswith("http"):
+                    controller_db.save_query_mapping(clean, video_id)
+                elapsed = round(time.time() - t_start, 2)
+                return {
+                    "status": "success",
+                    "id": video_id,
+                    "title": meta["title"],
+                    "duration": meta["duration"],
+                    "duration_sec": meta["duration_sec"],
+                    "thumbnail": meta["thumbnail"],
+                    "uploader": meta["uploader"],
+                    "youtube_url": meta["webpage_url"],
+                    "type": media_type,
+                    "quality": quality_label,
+                    "filename": filename,
+                    "elapsed_sec": elapsed,
+                    "_cached": True,
+                }
+
+    # Step 4: Not cached yet - resolve metadata from web
     meta = await resolve_metadata_async(query)
     video_id = meta["id"]
     filename = get_cache_filename(video_id, media_type)
@@ -131,10 +214,26 @@ async def resolve_and_download(
     else:
         cached = True
 
-    elapsed = round(time.time() - t_start, 2)
-    quality_label = f"{quality}p" if media_type.lower() == "video" else "192kbps"
+    # Step 5: Save to SQLite Database permanently for instant next hit!
+    controller_db.save_media_cache(
+        video_id=video_id,
+        title=meta["title"],
+        duration=meta["duration"],
+        duration_sec=meta["duration_sec"],
+        thumbnail=meta["thumbnail"],
+        uploader=meta["uploader"],
+        youtube_url=meta["webpage_url"],
+        audio_file=filename if media_type == "audio" else None,
+        video_file=filename if media_type == "video" else None,
+    )
+    # Save search query mappings
+    if clean != video_id and not clean.startswith("http"):
+        controller_db.save_query_mapping(clean, video_id)
+    if meta.get("title"):
+        controller_db.save_query_mapping(meta["title"], video_id)
 
-    # Return pure JSON without any third-party direct_url
+    elapsed = round(time.time() - t_start, 2)
+
     return {
         "status": "success",
         "id": video_id,
@@ -144,7 +243,7 @@ async def resolve_and_download(
         "thumbnail": meta["thumbnail"],
         "uploader": meta["uploader"],
         "youtube_url": meta["webpage_url"],
-        "type": media_type.lower(),
+        "type": media_type,
         "quality": quality_label,
         "filename": filename,
         "elapsed_sec": elapsed,
