@@ -164,10 +164,8 @@ async def resolve_and_download(
             # Smart Video Caching: Reuse ANY existing video file (480p, 720p, etc.)
             cached_file = find_cached_video(video_id)
         else:
-            # Check audio file
-            target_fname = get_cache_filename(video_id, "audio", ext=audio_fmt)
-            if is_cached(target_fname):
-                cached_file = target_fname
+            # Check audio file with format prioritization and smart fallbacks
+            cached_file = find_cached_audio(video_id, preferred_format=audio_fmt)
 
         if cached_file and is_cached(cached_file):
             db_media = controller_db.get_media_cache(video_id)
@@ -246,7 +244,8 @@ async def resolve_and_download(
         cached_vid = find_cached_video(video_id)
         filename = cached_vid if cached_vid else get_cache_filename(video_id, "video", ext="mp4")
     else:
-        filename = get_cache_filename(video_id, "audio", ext=audio_fmt)
+        cached_aud = find_cached_audio(video_id, preferred_format=audio_fmt)
+        filename = cached_aud if cached_aud else get_cache_filename(video_id, "audio", ext=audio_fmt)
 
     cached = is_cached(filename)
     if not cached:

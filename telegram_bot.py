@@ -1209,8 +1209,8 @@ async def handle_callback_query(cq: dict):
     msg = cq.get("message", {})
     chat_id = msg.get("chat", {}).get("id")
 
-    # Answer callback to remove loading animation
-    await call_tg("answerCallbackQuery", {"callback_query_id": cq_id})
+    # Answer callback instantly to remove loading animation without waiting
+    asyncio.create_task(call_tg("answerCallbackQuery", {"callback_query_id": cq_id}))
 
     is_adm, role = controller_db.is_admin(user_id)
     if not is_adm:
