@@ -303,6 +303,12 @@ async def search_media(
 
     try:
         search_data = await search_youtube_full(clean_query, max_results=5)
+    except ValueError as ve:
+        logger.warning(f"No results for '{clean_query}': {ve}")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No YouTube results found for: '{clean_query}'"
+        )
     except Exception as e:
         logger.error(f"Search failed for '{clean_query}': {e}", exc_info=True)
         raise HTTPException(
@@ -615,6 +621,12 @@ async def download_media(
             media_type=media_type,
             quality=quality,
             audio_format=audio_fmt
+        )
+    except ValueError as ve:
+        logger.warning(f"No results for download '{clean_query}': {ve}")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No YouTube results found for: '{clean_query}'"
         )
     except Exception as e:
         logger.error(f"Resolution failed for query '{clean_query}' [{media_type}]: {e}", exc_info=True)
