@@ -424,6 +424,9 @@ async def broadcast_api_log(log_data: dict):
     if m_type_lower == "search":
         type_icon = "🔍"
         type_label = "Sᴇᴀʀᴄʜ (Fast Meta)"
+    elif m_type_lower == "autoplay":
+        type_icon = "📻"
+        type_label = f"Aᴜᴛᴏᴘʟᴀʏ Vɪʙᴇ ({quality})"
     elif m_type_lower == "playlist":
         type_icon = "📑"
         type_label = f"Pʟᴀʏʟɪsᴛ ({quality})"
@@ -731,6 +734,9 @@ async def handle_api_endpoints(chat_id: int):
         f"📑 <b>6. Pʟᴀʏʟɪsᴛ API (25 Songs + Thumbnails)</b>\n"
         f"<code>{clean_base}/playlist?url=PLAYLIST_URL</code>\n"
         f"<i>Example:</i>\n<code>{clean_base}/playlist?url=https://youtube.com/playlist?list=RDIuvVVWOsMBo</code>\n\n"
+        f"📻 <b>7. Aᴜᴛᴏᴘʟᴀʏ Vɪʙᴇ API (35 Smart Vibe Songs - No Spam)</b>\n"
+        f"<code>{clean_base}/autoplay?url=YOUR_SONG_OR_URL</code>\n"
+        f"<i>Example:</i>\n<code>{clean_base}/autoplay?url=tum+hi+ho</code>\n\n"
         f"💡 <i>Tᴀᴘ <b>📄 JSOɴ</b> ʙᴇʟᴏᴡ ᴛᴏ ᴠɪᴇᴡ ʀᴇᴀᴅʏ-ᴛᴏ-ᴄᴏᴘʏ ʀᴇsᴘᴏɴsᴇ ғᴏʀᴍᴀᴛs, ᴏʀ <b>Tᴇsᴛ</b> ᴛᴏ ʀᴜɴ ɪɴsᴛᴀɴᴛʟʏ!</i>"
     )
     inline_kb = {
@@ -738,6 +744,7 @@ async def handle_api_endpoints(chat_id: int):
             [{"text": "🎙️ OPUS JSOɴ", "callback_data": "sample_json:opus"}, {"text": "🎵 MP3 JSOɴ", "callback_data": "sample_json:mp3"}],
             [{"text": "📱 M4A JSOɴ", "callback_data": "sample_json:m4a"}, {"text": "🎬 Vɪᴅᴇᴏ JSOɴ", "callback_data": "sample_json:video"}],
             [{"text": "🔍 Sᴇᴀʀᴄʜ JSOɴ", "callback_data": "sample_json:search"}, {"text": "📑 Pʟᴀʏʟɪsᴛ JSOɴ", "callback_data": "sample_json:playlist"}],
+            [{"text": "📻 Aᴜᴛᴏᴘʟᴀʏ JSOɴ", "callback_data": "sample_json:autoplay"}, {"text": "📻 Tᴇsᴛ Aᴜᴛᴏᴘʟᴀʏ", "callback_data": "test_prompt:autoplay"}],
             [{"text": "🎙️ Tᴇsᴛ OPUS", "callback_data": "test_prompt:opus"}, {"text": "🎵 Tᴇsᴛ MP3", "callback_data": "test_prompt:mp3"}],
             [{"text": "🎬 Tᴇsᴛ Vɪᴅᴇᴏ", "callback_data": "test_prompt:video"}, {"text": "🔍 Tᴇsᴛ Sᴇᴀʀᴄʜ", "callback_data": "test_prompt:search"}],
         ]
@@ -855,7 +862,44 @@ async def handle_endpoint_json_sample(chat_id: int, ep_type: str):
         }
         title = "🔍 Sᴇᴀʀᴄʜ API Rᴇsᴘᴏɴsᴇ JSOɴ"
         get_url = f"{clean_base}/search?query=fakira"
-        test_cb = "quick_test:search:fakira"
+    elif ep_type == "autoplay":
+        sample = {
+            "status": "success",
+            "seed": "tum hi ho",
+            "seed_id": "Umqb9KENgmk",
+            "total": 35,
+            "tracks": [
+                {
+                    "index": 1,
+                    "title": "Janam Janam",
+                    "duration": "03:09",
+                    "duration_sec": 189,
+                    "url": "https://www.youtube.com/watch?v=sX7fd8uQles",
+                    "thumbnail": "https://i.ytimg.com/vi/sX7fd8uQles/hqdefault.jpg"
+                },
+                {
+                    "index": 2,
+                    "title": "Sun Saathiya",
+                    "duration": "03:36",
+                    "duration_sec": 216,
+                    "url": "https://www.youtube.com/watch?v=TGpG56pg3UU",
+                    "thumbnail": "https://i.ytimg.com/vi/TGpG56pg3UU/hqdefault.jpg"
+                },
+                {
+                    "index": 3,
+                    "title": "Baarish",
+                    "duration": "04:36",
+                    "duration_sec": 276,
+                    "url": "https://www.youtube.com/watch?v=BNfAf4To73c",
+                    "thumbnail": "https://i.ytimg.com/vi/BNfAf4To73c/hqdefault.jpg"
+                }
+            ],
+            "elapsed_sec": 2.61,
+            "developer": OWNER_HANDLE,
+        }
+        title = "📻 Aᴜᴛᴏᴘʟᴀʏ Vɪʙᴇ API Rᴇsᴘᴏɴsᴇ JSOɴ (35 Tʀᴀᴄᴋs)"
+        get_url = f"{clean_base}/autoplay?url=tum+hi+ho"
+        test_cb = "quick_test:autoplay:tum+hi+ho"
     else:
         sample = {
             "status": "success",
@@ -923,6 +967,7 @@ async def handle_test_search_menu(chat_id: int):
     inline_kb = {
         "inline_keyboard": [
             [{"text": "🎵 Quick Audio (Fakira)", "callback_data": "quick_test:audio:fakira"}, {"text": "🎬 Quick Video (Fakira)", "callback_data": "quick_test:video:fakira"}],
+            [{"text": "📻 Quick Autoplay (Tum Hi Ho)", "callback_data": "quick_test:autoplay:tum+hi+ho"}],
             [{"text": "🔍 Quick Search (Fakira)", "callback_data": "quick_test:search:fakira"}, {"text": "📑 Quick Playlist", "callback_data": "quick_test:playlist:RDIuvVVWOsMBo"}],
         ]
     }
@@ -946,6 +991,9 @@ async def execute_api_test(chat_id: int, input_text: str, forced_mode: Optional[
         if "/playlist" in parsed.path:
             api_label = "Playlist"
             endpoint_path = f"{parsed.path}?{parsed.query}"
+        elif "/autoplay" in parsed.path:
+            api_label = "Autoplay"
+            endpoint_path = f"{parsed.path}?{parsed.query}"
         elif "/download" in parsed.path:
             api_label = "Video" if "type=video" in parsed.query else "Audio"
             endpoint_path = f"{parsed.path}?{parsed.query}"
@@ -968,6 +1016,9 @@ async def execute_api_test(chat_id: int, input_text: str, forced_mode: Optional[
             elif forced_mode == "m4a":
                 api_label = "Audio (M4A)"
                 endpoint_path = f"/download?type=audio&format=m4a&url={urllib.parse.quote(input_text, safe='')}"
+            elif forced_mode == "autoplay":
+                api_label = "Autoplay"
+                endpoint_path = f"/autoplay?url={urllib.parse.quote(input_text, safe='')}"
             else:
                 api_label = "Search"
                 endpoint_path = f"/search?query={urllib.parse.quote(input_text, safe='')}"
@@ -988,6 +1039,9 @@ async def execute_api_test(chat_id: int, input_text: str, forced_mode: Optional[
         elif forced_mode == "playlist":
             api_label = "Playlist"
             endpoint_path = f"/playlist?url={urllib.parse.quote(input_text, safe='')}"
+        elif forced_mode == "autoplay":
+            api_label = "Autoplay"
+            endpoint_path = f"/autoplay?url={urllib.parse.quote(input_text, safe='')}"
         else:
             api_label = "Search"
             endpoint_path = f"/search?query={urllib.parse.quote(input_text, safe='')}"
@@ -1083,6 +1137,14 @@ async def execute_api_test(chat_id: int, input_text: str, forced_mode: Optional[
             f"⏱️ <b>Tɪᴍᴇ:</b> <code>{data.get('elapsed_sec', 0.0)}s</code>\n"
             f"👨‍💻 <b>Dᴇᴠᴇʟᴏᴘᴇʀ:</b> <code>{data.get('developer', OWNER_HANDLE)}</code>\n"
         )
+    elif api_label == "Autoplay":
+        card_text = (
+            f"📻 <b>Aᴜᴛᴏᴘʟᴀʏ Vɪʙᴇ Rᴇsᴜʟᴛ: Sᴜᴄᴄᴇss</b>\n\n"
+            f"🎵 <b>Sᴇᴇᴅ Sᴏɴɢ:</b> <code>{data.get('seed', 'Unknown')}</code>\n"
+            f"🔢 <b>Tᴏᴛᴀʟ Vɪʙᴇ Tʀᴀᴄᴋs:</b> <code>{data.get('total', 0)}</code>\n"
+            f"⚡ <b>Sᴘᴇᴇᴅ:</b> <code>{data.get('elapsed_sec', 0.0)}s</code>\n"
+            f"👨‍💻 <b>Dᴇᴠᴇʟᴏᴘᴇʀ:</b> <code>{data.get('developer', OWNER_HANDLE)}</code>\n"
+        )
     else:
         card_text = (
             f"✅ <b>{api_label.upper()} Rᴇsᴜʟᴛ: Sᴜᴄᴄᴇss</b>\n\n"
@@ -1090,7 +1152,7 @@ async def execute_api_test(chat_id: int, input_text: str, forced_mode: Optional[
             f"⏱️ <b>Dᴜʀᴀᴛɪᴏɴ:</b> <code>{data.get('duration', '00:00')}</code>\n"
             f"📁 <b>Fɪʟᴇ:</b> <code>{data.get('filename', '')}</code>\n"
             f"⚡ <b>Sᴘᴇᴇᴅ:</b> <code>{data.get('elapsed_sec', 0.0)}s</code>\n"
-            f"🔗 <b>Sᴛʀᴇᴀᴍ URL:</b>\n<code>{data.get('stream_url', '')}</code>\n"
+            f"🔗 <b>SᴛʀᴇᴀM URL:</b>\n<code>{data.get('stream_url', '')}</code>\n"
             f"👨‍💻 <b>Dᴇᴠᴇʟᴏᴘᴇʀ:</b> <code>{data.get('developer', OWNER_HANDLE)}</code>\n"
         )
 
@@ -1100,6 +1162,8 @@ async def execute_api_test(chat_id: int, input_text: str, forced_mode: Optional[
         preview_data = dict(data)
         if "items" in preview_data and isinstance(preview_data["items"], list) and len(preview_data["items"]) > 2:
             preview_data["items"] = preview_data["items"][:2] + [f"... ({len(data['items'])} items extracted)"]
+        if "tracks" in preview_data and isinstance(preview_data["tracks"], list) and len(preview_data["tracks"]) > 2:
+            preview_data["tracks"] = preview_data["tracks"][:2] + [f"... ({len(data['tracks'])} vibe tracks indexed)"]
         if "indexes" in preview_data and isinstance(preview_data["indexes"], dict) and len(preview_data["indexes"]) > 2:
             preview_data["indexes"] = {f"index_{k}": preview_data["indexes"][f"index_{k}"] for k in (1, 2) if f"index_{k}" in preview_data["indexes"]}
             preview_data["indexes"]["..."] = f"(Total {data.get('total_items')} items indexed)"
@@ -1196,7 +1260,8 @@ async def handle_callback_query(cq: dict):
             "m4a": "📱 M4A (AAC)",
             "video": "🎬 Vɪᴅᴇᴏ (480p)",
             "search": "🔍 Sᴇᴀʀᴄʜ (Fast Meta)",
-            "playlist": "📑 Pʟᴀʏʟɪsᴛ (25 Songs)"
+            "playlist": "📑 Pʟᴀʏʟɪsᴛ (25 Songs)",
+            "autoplay": "📻 Aᴜᴛᴏᴘʟᴀʏ Vɪʙᴇ (35 Songs)"
         }
         await send_msg(
             chat_id,
@@ -1287,8 +1352,10 @@ async def handle_message(msg: dict):
         )
         return
 
+    t_upper = text.strip().upper()
+
     # Button triggers
-    if text in ("/start", "/menu", "Cʟɪᴄᴋ Oɴ"):
+    if text in ("/start", "/menu", "Cʟɪᴄᴋ Oɴ") or t_upper in ("START", "MENU", "/START", "/MENU"):
         welcome = (
             f"⚡ <b>GᴀᴍᴇOᴠᴇʀ API Lᴏɢs &amp; Cᴏɴᴛʀᴏʟʟᴇʀ</b>\n\n"
             f"Yᴏᴜ ᴀʀᴇ ʟᴏɢɢᴇᴅ ɪɴ ᴀs: <code>{role.upper()}</code>\n"
@@ -1296,31 +1363,31 @@ async def handle_message(msg: dict):
         )
         await send_msg(chat_id, welcome, reply_markup=get_main_keyboard(), track=False)
 
-    elif text in ("⚡ API Eɴᴅᴘᴏɪɴᴛs", "/apis", "/endpoints"):
+    elif text in ("⚡ API Eɴᴅᴘᴏɪɴᴛs", "/apis", "/endpoints") or "API ENDPOINTS" in t_upper or "ENDPOINTS" in t_upper:
         await handle_api_endpoints(chat_id)
 
-    elif text in ("🔍 Tᴇsᴛ Sᴇᴀʀᴄʜ", "/test", "/tester", "/search_menu"):
+    elif text in ("🔍 Tᴇsᴛ Sᴇᴀʀᴄʜ", "/test", "/tester", "/search_menu") or "TEST SEARCH" in t_upper or t_upper == "TEST":
         await handle_test_search_menu(chat_id)
 
-    elif text == "📊 Sᴛᴀᴛs":
+    elif text == "📊 Sᴛᴀᴛs" or t_upper in ("STATS", "📊 STATS", "/STATS"):
         await handle_stats(chat_id)
 
-    elif text == "🌐 IPs Lɪsᴛ":
+    elif text == "🌐 IPs Lɪsᴛ" or "IPS LIST" in t_upper or t_upper in ("IPS", "IP LIST"):
         await handle_ips_list(chat_id)
 
-    elif text == "🚫 Bʟᴏᴄᴋ Mᴀɴᴀɢᴇʀ":
+    elif text == "🚫 Bʟᴏᴄᴋ Mᴀɴᴀɢᴇʀ" or "BLOCK MANAGER" in t_upper or t_upper in ("BLOCKS", "BLOCK"):
         await handle_block_manager(chat_id)
 
-    elif text == "⏱️ Lɪᴍɪᴛ Mᴀɴᴀɢᴇʀ":
+    elif text == "⏱️ Lɪᴍɪᴛ Mᴀɴᴀɢᴇʀ" or "LIMIT MANAGER" in t_upper or t_upper in ("LIMITS", "LIMIT"):
         await handle_limit_manager(chat_id)
 
-    elif text == "👥 Aᴅᴍɪɴs":
+    elif text == "👥 Aᴅᴍɪɴs" or "ADMINS" in t_upper or t_upper in ("ADMIN", "/ADMINS"):
         await handle_admins_menu(chat_id)
 
-    elif text == "🧹 Cʟᴇᴀʀ Oʟᴅ Lᴏɢs":
+    elif text == "🧹 Cʟᴇᴀʀ Oʟᴅ Lᴏɢs" or "CLEAR OLD LOGS" in t_upper:
         await handle_clear_old_logs(chat_id)
 
-    elif text in ("❌ Cʟᴏsᴇ Mᴇɴᴜ", "/close", "close", "Close"):
+    elif text in ("❌ Cʟᴏsᴇ Mᴇɴᴜ", "/close", "close", "Close") or "CLOSE MENU" in t_upper or t_upper == "CLOSE":
         await send_msg(
             chat_id,
             "✖️ <b>Mᴇɴᴜ Cʟᴏsᴇᴅ.</b>\nTʏᴘᴇ /start ᴏʀ /menu ᴛᴏ ᴏᴘᴇɴ ᴀᴛ ᴀɴʏ ᴛɪᴍᴇ.",
@@ -1431,6 +1498,13 @@ async def handle_message(msg: dict):
         else:
             await send_msg(chat_id, "Usage: <code>/playlist &lt;playlist URL&gt;</code>")
 
+    elif text.startswith("/autoplay"):
+        q = text.split(" ", 1)[1].strip() if " " in text else ""
+        if q:
+            asyncio.create_task(execute_api_test(chat_id, q, forced_mode="autoplay"))
+        else:
+            await send_msg(chat_id, "Usage: <code>/autoplay &lt;song name or URL&gt;</code>")
+
     else:
         # Check if text is a raw IP address
         if re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", text):
@@ -1467,6 +1541,12 @@ async def telegram_polling_loop():
     logger.info("Starting Telegram Bot Controller (@YOUTUBE_API_LOGS_BOT)")
     logger.info(f"Owner: {OWNER_ID} ({OWNER_HANDLE})")
     logger.info("==================================================")
+
+    # Auto-delete any webhook so getUpdates long polling never conflicts (409 Conflict)
+    try:
+        await call_tg("deleteWebhook", {"drop_pending_updates": False})
+    except Exception as e:
+        logger.warning(f"Could not delete webhook: {e}")
 
     # Start 24h message auto-pruner
     asyncio.create_task(auto_pruner_task())

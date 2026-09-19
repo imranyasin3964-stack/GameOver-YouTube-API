@@ -4,6 +4,7 @@ import aiofiles
 import json
 import logging
 import re
+import time
 import urllib.parse
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple, List
@@ -593,5 +594,195 @@ async def extract_playlist_full(playlist_url_or_id: str, max_items: int = 25) ->
         "playlist_title": playlist_title,
         "total_items": len(raw_items),
         "items": raw_items,
+    }
+
+
+def extract_movie_signature(title: str, byline: str = "") -> Optional[str]:
+    """Extracts movie/album keyword to avoid consecutive same-movie spam."""
+    patterns = [
+        r'\[From ["\']([^"\']+)["\']\]',
+        r'\(From ["\']([^"\']+)["\']\)',
+        r'From ["\']([^"\']+)["\']',
+        r'\|\s*([^|]+)\s*\|',
+        r'-\s*([^-]+)\s*-',
+    ]
+    for p in patterns:
+        m = re.search(p, title, re.IGNORECASE)
+        if m:
+            cand = m.group(1).strip().lower()
+            if len(cand) > 2 and not any(w in cand for w in ['lyric', 'audio', 'video', 'official', 'full song', 'remix', 'version', 'feat', 'ft']):
+                return cand
+
+    combined = (title + " " + byline).lower()
+    known_franchises = [
+        'aashiqui 2', 'aashiqui', 'kabir singh', 'shershaah', 'ae dil hai mushkil',
+        'half girlfriend', 'animal', 'fanaa', 'roohi', 'bodyguard', 'ek tha tiger',
+        'tiger zinda hai', 'student of the year 2', 'student of the year', 'yeh jawaani hai deewani',
+        'marjaavaan', 'dilwale', 'rustom', 'chhichhore', 'fukrey', 'jawan', 'pathaan'
+    ]
+    for k in known_franchises:
+        if k in combined:
+            return k
+    return None
+
+
+async def resolve_smart_autoplay(seed_query: str, target_count: int = 35) -> Dict[str, Any]:
+    """
+    Smart Vibe Autoplay Resolver Engine:
+    1. Resolves seed song name or YouTube URL.
+    2. Queries YouTube Music Radio (WEB_REMIX + RDAMVM) for 50 candidate songs.
+    3. Strictly enforces Anti-Spam Vibe Filtering:
+       - Never returns the seed song or duplicate title variations.
+       - Bans consecutive tracks from the same movie or album.
+       - Maximum 2 tracks from the same movie across the whole 35 tracks.
+       - Filters out 1-hour loops or full album jukeboxes.
+    4. Fast execution (2-4 seconds) without downloading or encoding media.
+    """
+    t0 = time.time()
+    clean = seed_query.strip()
+    seed_id = extract_video_id(clean)
+    seed_title = clean
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    async with aiohttp.ClientSession(headers=headers) as session:
+        # Step 1: Resolve seed video ID & Title if needed
+        if not seed_id:
+            search_url = f"https://www.youtube.com/results?search_query={urllib.parse.quote(clean)}"
+            async with session.get(search_url, timeout=aiohttp.ClientTimeout(total=5.0)) as resp:
+                html = await resp.text(errors="ignore")
+                v_ids = re.findall(r"/watch\?v=([a-zA-Z0-9_-]{11})", html)
+                if not v_ids:
+                    raise ValueError(f"Could not find YouTube video for seed: '{seed_query}'")
+                seed_id = v_ids[0]
+                t_match = re.search(r'"title":\s*\{\s*"runs":\s*\[\s*\{\s*"text":\s*"([^"]+)"', html)
+                if t_match:
+                    seed_title = t_match.group(1)
+
+        # Step 2: Query YouTube Music Radio via WEB_REMIX client
+        music_payload = {
+            "context": {
+                "client": {
+                    "clientName": "WEB_REMIX",
+                    "clientVersion": "1.20240101.01.00",
+                    "hl": "en",
+                    "gl": "US"
+                }
+            },
+            "videoId": seed_id,
+            "playlistId": f"RDAMVM{seed_id}",
+            "isAudioOnly": True
+        }
+        raw_candidates = []
+        try:
+            async with session.post(
+                "https://music.youtube.com/youtubei/v1/next",
+                json=music_payload,
+                timeout=aiohttp.ClientTimeout(total=6.0)
+            ) as m_resp:
+                if m_resp.status == 200:
+                    data = await m_resp.json()
+                    def parse_renderers(obj):
+                        if isinstance(obj, dict):
+                            if "playlistPanelVideoRenderer" in obj:
+                                r = obj["playlistPanelVideoRenderer"]
+                                vid = r.get("videoId")
+                                title = "".join(x.get("text", "") for x in r.get("title", {}).get("runs", []))
+                                dur = "".join(x.get("text", "") for x in r.get("lengthText", {}).get("runs", [])) or r.get("lengthText", {}).get("simpleText", "03:30")
+                                by = "".join(x.get("text", "") for x in r.get("longBylineText", {}).get("runs", []))
+                                yield (vid, title, dur, by)
+                            for val in obj.values():
+                                yield from parse_renderers(val)
+                        elif isinstance(obj, list):
+                            for itm in obj:
+                                yield from parse_renderers(itm)
+                    raw_candidates = list(parse_renderers(data))
+        except Exception as e:
+            logger.warning(f"[Autoplay] YouTube Music radio note: {e}")
+
+        # Step 3: Fallback supplement if < 35 candidates
+        if len(raw_candidates) < target_count:
+            try:
+                supp_query = f"{seed_title} playlist"
+                async with session.get(
+                    f"https://www.youtube.com/results?search_query={urllib.parse.quote(supp_query)}",
+                    timeout=aiohttp.ClientTimeout(total=4.0)
+                ) as s_resp:
+                    s_html = await s_resp.text(errors="ignore")
+                    extra_vids = re.findall(r"/watch\?v=([a-zA-Z0-9_-]{11})", s_html)
+                    for ev in extra_vids:
+                        if ev != seed_id and ev not in [c[0] for c in raw_candidates]:
+                            raw_candidates.append((ev, seed_title, "03:30", "YouTube"))
+            except Exception:
+                pass
+
+        # Step 4: Smart Anti-Spam Vibe Filter
+        selected_tracks = []
+        seen_ids = set([seed_id])
+        seen_base_titles = set()
+        movie_counts = {}
+        last_movie = None
+
+        # Clean seed title for comparison
+        clean_seed = re.sub(r"[\(\[\{].*?[\)\]\}]", "", seed_title).strip().lower()
+        clean_seed = re.sub(r"[^a-zA-Z0-9 ]", "", clean_seed).strip()
+        seen_base_titles.add(clean_seed)
+
+        for vid, title, dur_str, byline in raw_candidates:
+            if not vid or len(vid) != 11 or vid in seen_ids:
+                continue
+
+            # Parse duration and filter out 1-hour loops or ultra long mixes
+            dur_sec = parse_duration_to_sec(dur_str)
+            if dur_sec > 660:  # > 11 mins is usually a full album/loop
+                continue
+
+            # Clean title
+            clean_t = re.sub(r"[\(\[\{].*?[\)\]\}]", "", title).strip().lower()
+            clean_t = re.sub(r"[^a-zA-Z0-9 ]", "", clean_t).strip()
+            if not clean_t or clean_t in seen_base_titles:
+                continue
+
+            # Detect movie/album signature
+            movie = extract_movie_signature(title, byline)
+            if movie:
+                # Rule: No consecutive tracks from the same movie
+                if movie == last_movie:
+                    continue
+                # Rule: Max 2 tracks from the same movie across the whole playlist
+                if movie_counts.get(movie, 0) >= 2:
+                    continue
+                movie_counts[movie] = movie_counts.get(movie, 0) + 1
+                last_movie = movie
+            else:
+                last_movie = None
+
+            seen_ids.add(vid)
+            seen_base_titles.add(clean_t)
+
+            idx = len(selected_tracks) + 1
+            selected_tracks.append({
+                "index": idx,
+                "title": title,
+                "duration": dur_str,
+                "duration_sec": dur_sec,
+                "url": f"https://www.youtube.com/watch?v={vid}",
+                "thumbnail": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"
+            })
+
+            if len(selected_tracks) >= target_count:
+                break
+
+    elapsed = round(time.time() - t0, 2)
+    return {
+        "status": "success",
+        "seed": clean,
+        "seed_id": seed_id,
+        "total": len(selected_tracks),
+        "tracks": selected_tracks,
+        "elapsed_sec": elapsed,
+        "developer": "@XHamsterFounders"
     }
 

@@ -18,7 +18,7 @@ from cache_manager import (
     is_cached,
 )
 from engine import resolve_and_download
-from scraper_engine import search_youtube_full, extract_playlist_full
+from scraper_engine import search_youtube_full, extract_playlist_full, resolve_smart_autoplay
 from controller_db import (
     check_and_increment_ip,
     scan_and_index_cache_directory,
@@ -475,6 +475,85 @@ async def playlist_media(
     asyncio.create_task(broadcast_api_log(log_data))
 
     return JSONResponse(content=response_payload)
+
+
+@app.get("/GET /autoplay")
+@app.get("/GET/autoplay")
+@app.get("/autoplay")
+async def autoplay_tracks(
+    request: Request,
+    url: Optional[str] = Query(None, description="Song title, search query, or YouTube URL (Placed at end)"),
+    query: Optional[str] = Query(None, description="Alternative parameter for song"),
+    q: Optional[str] = Query(None, description="Alternative short parameter for song"),
+    limit: int = Query(35, ge=1, le=50, description="Number of tracks to return (default 35)"),
+):
+    """
+    Dedicated Smart Vibe Autoplay API:
+    Returns 35 vibe-matched YouTube songs without audio downloading.
+    Anti-spam movie filter ensures no consecutive tracks from the same movie or album!
+    Order: GET /autoplay?url=tum+hi+ho
+    """
+    target = url or query or q
+    if not target:
+        raw_query = request.url.query
+        if "url=" in raw_query:
+            target = raw_query.split("url=", 1)[1]
+        elif "query=" in raw_query:
+            target = raw_query.split("query=", 1)[1].split("&")[0]
+        elif "q=" in raw_query:
+            target = raw_query.split("q=", 1)[1].split("&")[0]
+
+    if not target or not target.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing required parameter: 'url' (e.g. /autoplay?url=tum+hi+ho)"
+        )
+
+    client_ip = request.client.host if request.client else "127.0.0.1"
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        client_ip = forwarded.split(",")[0].strip()
+
+    allowed, is_blocked, msg = check_and_increment_ip(client_ip)
+    if not allowed:
+        if is_blocked:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=msg)
+        else:
+            raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=msg)
+
+    clean_target = target.strip()
+    t_start = time.time()
+    try:
+        result = await resolve_smart_autoplay(clean_target, target_count=limit)
+    except Exception as e:
+        logger.error(f"Autoplay failed for '{clean_target}': {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to generate autoplay recommendations: {str(e)}"
+        )
+
+    # Broadcast log to Telegram Bot admins
+    elapsed = round(time.time() - t_start, 2)
+    log_data = {
+        "ip": client_ip,
+        "query": clean_target,
+        "type": "autoplay",
+        "quality": f"{result.get('total', limit)} tracks",
+        "cached": False,
+        "elapsed_sec": elapsed,
+        "title": result.get("seed", clean_target),
+        "response": {
+            "status": "success",
+            "seed": result.get("seed"),
+            "total": result.get("total"),
+            "sample_song": result["tracks"][0]["title"] if result.get("tracks") else "None",
+            "elapsed_sec": elapsed,
+            "developer": "@XHamsterFounders"
+        }
+    }
+    asyncio.create_task(broadcast_api_log(log_data))
+
+    return JSONResponse(content=result)
 
 
 @app.get("/GET /download")
