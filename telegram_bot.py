@@ -191,8 +191,20 @@ async def send_audio_file(chat_id: int, file_path: str, title: str, performer: s
     data.add_field("duration", str(duration))
     data.add_field("caption", caption)
     data.add_field("parse_mode", "HTML")
+    fname = os.path.basename(file_path)
+    if fname.endswith(".opus"):
+        content_type = "audio/ogg"
+    elif fname.endswith(".m4a"):
+        content_type = "audio/mp4"
+    elif fname.endswith(".flac"):
+        content_type = "audio/flac"
+    elif fname.endswith(".wav"):
+        content_type = "audio/wav"
+    else:
+        content_type = "audio/mpeg"
+
     with open(file_path, "rb") as f:
-        data.add_field("audio", f, filename=os.path.basename(file_path), content_type="audio/mpeg")
+        data.add_field("audio", f, filename=fname, content_type=content_type)
         async with aiohttp.ClientSession() as session:
             try:
                 async with session.post(url, data=data, timeout=aiohttp.ClientTimeout(total=180.0)) as resp:
@@ -229,13 +241,22 @@ async def send_video_file(chat_id: int, file_path: str, caption: str) -> bool:
                 return False
 
 
-async def download_and_upload_audio(chat_id: int, video_id: str, title: str = ""):
+async def download_and_upload_audio(chat_id: int, video_id: str, title: str = "", audio_format: str = "opus"):
     """Downloads audio via local engine and uploads directly into Telegram chat"""
+    fmt_labels = {
+        "opus": "🎙️ OPUS (Studio HD)",
+        "mp3": "🎵 MP3 (320k)",
+        "m4a": "📱 M4A (AAC)",
+        "flac": "🎼 FLAC (Lossless)",
+        "wav": "🔊 WAV (Master)",
+    }
+    fmt_tag = fmt_labels.get(audio_format.lower(), f"🎵 {audio_format.upper()}")
+
     progress_msg_id = await send_msg(
         chat_id,
-        f"⏳ <b>Dᴏᴡɴʟᴏᴀᴅɪɴɢ Aᴜᴅɪᴏ...</b>\n🎵 <i>{title or video_id}</i>\nPʟᴇᴀsᴇ ᴡᴀɪᴛ ᴀ ғᴇᴡ sᴇᴄᴏɴᴅs..."
+        f"⏳ <b>Dᴏᴡɴʟᴏᴀᴅɪɴɢ {fmt_tag}...</b>\n🎵 <i>{title or video_id}</i>\nPʟᴇᴀsᴇ ᴡᴀɪᴛ ᴀ ғᴇᴡ sᴇᴄᴏɴᴅs..."
     )
-    url = f"http://127.0.0.1:{PORT}/download?type=audio&url=https://www.youtube.com/watch?v={video_id}"
+    url = f"http://127.0.0.1:{PORT}/download?type=audio&format={audio_format.lower()}&url=https://www.youtube.com/watch?v={video_id}"
     data = None
     try:
         async with aiohttp.ClientSession() as session:
@@ -258,14 +279,16 @@ async def download_and_upload_audio(chat_id: int, video_id: str, title: str = ""
     dur_sec = data.get("duration_sec", 0)
     song_title = data.get("title", title)
     uploader = data.get("uploader", "YouTube")
+    quality_name = data.get("quality", fmt_tag)
 
     if progress_msg_id:
-        await edit_msg(chat_id, progress_msg_id, f"📤 <b>Uᴘʟᴏᴀᴅɪɴɢ Aᴜᴅɪᴏ ᴛᴏ Tᴇʟᴇɢʀᴀᴍ...</b>\n🎵 <i>{song_title}</i>")
+        await edit_msg(chat_id, progress_msg_id, f"📤 <b>Uᴘʟᴏᴀᴅɪɴɢ {fmt_tag} ᴛᴏ Tᴇʟᴇɢʀᴀᴍ...</b>\n🎵 <i>{song_title}</i>")
 
     uploaded = False
     if local_file and local_file.exists():
         caption = (
             f"🎵 <b>{song_title}</b>\n\n"
+            f"🎧 <b>Fᴏʀᴍᴀᴛ:</b> <code>{quality_name}</code>\n"
             f"⏱️ <b>Dᴜʀᴀᴛɪᴏɴ:</b> <code>{dur_str}</code> | ⚡ <b>Sᴘᴇᴇᴅ:</b> <code>{elapsed}s</code>\n"
             f"🔗 <b>Sᴛʀᴇᴀᴍ URL:</b> <code>{stream_url}</code>\n"
             f"👨‍💻 <b>Dᴇᴠᴇʟᴏᴘᴇʀ:</b> {OWNER_HANDLE}"
@@ -281,8 +304,9 @@ async def download_and_upload_audio(chat_id: int, video_id: str, title: str = ""
 
     if not uploaded:
         text = (
-            f"🎵 <b>Aᴜᴅɪᴏ Rᴇᴀᴅʏ!</b>\n\n"
+            f"🎵 <b>{fmt_tag} Rᴇᴀᴅʏ!</b>\n\n"
             f"🎵 <b>Tɪᴛʟᴇ:</b> <code>{song_title}</code>\n"
+            f"🎧 <b>Fᴏʀᴍᴀᴛ:</b> <code>{quality_name}</code>\n"
             f"⏱️ <b>Dᴜʀᴀᴛɪᴏɴ:</b> <code>{dur_str}</code> | ⚡ <b>Sᴘᴇᴇᴅ:</b> <code>{elapsed}s</code>\n"
             f"🔗 <b>Sᴛʀᴇᴀᴍ URL:</b>\n<code>{stream_url}</code>\n\n"
             f"👨‍💻 <b>Dᴇᴠᴇʟᴏᴘᴇʀ:</b> {OWNER_HANDLE}"
@@ -688,27 +712,34 @@ async def handle_api_endpoints(chat_id: int):
     text = (
         f"⚡ <b>GᴀᴍᴇOᴠᴇʀ YouTube API Eɴᴅᴘᴏɪɴᴛs</b>\n\n"
         f"<i>All endpoints run with zero cookies and no web botguard. Tap any URL below to copy:</i>\n\n"
-        f"🎵 <b>1. Aᴜᴅɪᴏ API (MP3 Stream)</b>\n"
-        f"<code>{clean_base}/download?type=audio&amp;url=YOUR_SONG_OR_URL</code>\n"
-        f"<i>Example:</i>\n<code>{clean_base}/download?type=audio&amp;url=tum+hi+ho</code>\n\n"
-        f"🎬 <b>2. Vɪᴅᴇᴏ API (MP4 Stream)</b>\n"
-        f"<code>{clean_base}/download?type=video&amp;quality=720&amp;url=YOUR_SONG_OR_URL</code>\n"
-        f"<i>Qualities: 720, 480, 360</i>\n"
-        f"<i>Example:</i>\n<code>{clean_base}/download?type=video&amp;quality=720&amp;url=fakira</code>\n\n"
-        f"🔍 <b>3. Sᴇᴀʀᴄʜ API (Ultra-Fast 0.3s)</b>\n"
+        f"👑 <b>1. OPUS Aᴜᴅɪᴏ API (Default - 48kHz Studio HD)</b>\n"
+        f"<code>{clean_base}/download?type=audio&amp;format=opus&amp;url=YOUR_SONG_OR_URL</code>\n"
+        f"<i>Example:</i>\n<code>{clean_base}/download?type=audio&amp;format=opus&amp;url=tum+hi+ho</code>\n\n"
+        f"🎵 <b>2. MP3 Aᴜᴅɪᴏ API (320kbps)</b>\n"
+        f"<code>{clean_base}/download?type=audio&amp;format=mp3&amp;url=YOUR_SONG_OR_URL</code>\n"
+        f"<i>Example:</i>\n<code>{clean_base}/download?type=audio&amp;format=mp3&amp;url=fakira</code>\n\n"
+        f"📱 <b>3. M4A Aᴜᴅɪᴏ API (Hardware AAC)</b>\n"
+        f"<code>{clean_base}/download?type=audio&amp;format=m4a&amp;url=YOUR_SONG_OR_URL</code>\n"
+        f"<i>Example:</i>\n<code>{clean_base}/download?type=audio&amp;format=m4a&amp;url=fakira</code>\n\n"
+        f"🎬 <b>4. Vɪᴅᴇᴏ API (MP4 Stream - Smart Cache Reuse)</b>\n"
+        f"<code>{clean_base}/download?type=video&amp;quality=480&amp;url=YOUR_SONG_OR_URL</code>\n"
+        f"<i>Qualities: 480, 720, 360</i>\n"
+        f"<i>Example:</i>\n<code>{clean_base}/download?type=video&amp;quality=480&amp;url=fakira</code>\n\n"
+        f"🔍 <b>5. Sᴇᴀʀᴄʜ API (Ultra-Fast 0.3s)</b>\n"
         f"<code>{clean_base}/search?query=YOUR_QUERY</code>\n"
         f"<i>Example:</i>\n<code>{clean_base}/search?query=fakira</code>\n\n"
-        f"📑 <b>4. Pʟᴀʏʟɪsᴛ API (25 Songs + Thumbnails)</b>\n"
+        f"📑 <b>6. Pʟᴀʏʟɪsᴛ API (25 Songs + Thumbnails)</b>\n"
         f"<code>{clean_base}/playlist?url=PLAYLIST_URL</code>\n"
         f"<i>Example:</i>\n<code>{clean_base}/playlist?url=https://youtube.com/playlist?list=RDIuvVVWOsMBo</code>\n\n"
         f"💡 <i>Tᴀᴘ <b>📄 JSOɴ</b> ʙᴇʟᴏᴡ ᴛᴏ ᴠɪᴇᴡ ʀᴇᴀᴅʏ-ᴛᴏ-ᴄᴏᴘʏ ʀᴇsᴘᴏɴsᴇ ғᴏʀᴍᴀᴛs, ᴏʀ <b>Tᴇsᴛ</b> ᴛᴏ ʀᴜɴ ɪɴsᴛᴀɴᴛʟʏ!</i>"
     )
     inline_kb = {
         "inline_keyboard": [
-            [{"text": "📄 Aᴜᴅɪᴏ JSOɴ", "callback_data": "sample_json:audio"}, {"text": "📄 Vɪᴅᴇᴏ JSOɴ", "callback_data": "sample_json:video"}],
-            [{"text": "📄 Sᴇᴀʀᴄʜ JSOɴ", "callback_data": "sample_json:search"}, {"text": "📄 Pʟᴀʏʟɪsᴛ JSOɴ", "callback_data": "sample_json:playlist"}],
-            [{"text": "🎵 Tᴇsᴛ Aᴜᴅɪᴏ", "callback_data": "test_prompt:audio"}, {"text": "🎬 Tᴇsᴛ Vɪᴅᴇᴏ", "callback_data": "test_prompt:video"}],
-            [{"text": "🔍 Tᴇsᴛ Sᴇᴀʀᴄʜ", "callback_data": "test_prompt:search"}, {"text": "📑 Tᴇsᴛ Pʟᴀʏʟɪsᴛ", "callback_data": "test_prompt:playlist"}],
+            [{"text": "🎙️ OPUS JSOɴ", "callback_data": "sample_json:opus"}, {"text": "🎵 MP3 JSOɴ", "callback_data": "sample_json:mp3"}],
+            [{"text": "📱 M4A JSOɴ", "callback_data": "sample_json:m4a"}, {"text": "🎬 Vɪᴅᴇᴏ JSOɴ", "callback_data": "sample_json:video"}],
+            [{"text": "🔍 Sᴇᴀʀᴄʜ JSOɴ", "callback_data": "sample_json:search"}, {"text": "📑 Pʟᴀʏʟɪsᴛ JSOɴ", "callback_data": "sample_json:playlist"}],
+            [{"text": "🎙️ Tᴇsᴛ OPUS", "callback_data": "test_prompt:opus"}, {"text": "🎵 Tᴇsᴛ MP3", "callback_data": "test_prompt:mp3"}],
+            [{"text": "🎬 Tᴇsᴛ Vɪᴅᴇᴏ", "callback_data": "test_prompt:video"}, {"text": "🔍 Tᴇsᴛ Sᴇᴀʀᴄʜ", "callback_data": "test_prompt:search"}],
         ]
     }
     await send_msg(chat_id, text, reply_markup=inline_kb)
@@ -716,7 +747,7 @@ async def handle_api_endpoints(chat_id: int):
 
 async def handle_endpoint_json_sample(chat_id: int, ep_type: str):
     clean_base = BASE_URL.rstrip("/")
-    if ep_type == "audio":
+    if ep_type in ("audio", "opus"):
         sample = {
             "status": "success",
             "id": "eJuoi13hbBc",
@@ -727,15 +758,55 @@ async def handle_endpoint_json_sample(chat_id: int, ep_type: str):
             "uploader": "Zee Music Company",
             "youtube_url": "https://www.youtube.com/watch?v=eJuoi13hbBc",
             "type": "audio",
-            "quality": "320k",
+            "quality": "Studio HD (48kHz Opus)",
+            "filename": "audio_eJuoi13hbBc.opus",
+            "elapsed_sec": 0.005,
+            "stream_url": f"{clean_base}/media/audio_eJuoi13hbBc.opus",
+            "developer": OWNER_HANDLE,
+        }
+        title = "👑 OPUS Aᴜᴅɪᴏ API Rᴇsᴘᴏɴsᴇ JSOɴ (Dᴇғᴀᴜʟᴛ)"
+        get_url = f"{clean_base}/download?type=audio&format=opus&url=tum+hi+ho"
+        test_cb = "quick_test:opus:fakira"
+    elif ep_type == "mp3":
+        sample = {
+            "status": "success",
+            "id": "eJuoi13hbBc",
+            "title": "Fakira - Lyrical | Student Of The Year 2 | Tiger Shroff, Tara & Ananya",
+            "duration": "03:30",
+            "duration_sec": 210,
+            "thumbnail": "https://i.ytimg.com/vi/eJuoi13hbBc/hqdefault.jpg",
+            "uploader": "Zee Music Company",
+            "youtube_url": "https://www.youtube.com/watch?v=eJuoi13hbBc",
+            "type": "audio",
+            "quality": "320kbps MP3",
             "filename": "audio_eJuoi13hbBc.mp3",
-            "elapsed_sec": 0.45,
+            "elapsed_sec": 0.005,
             "stream_url": f"{clean_base}/media/audio_eJuoi13hbBc.mp3",
             "developer": OWNER_HANDLE,
         }
-        title = "🎵 Aᴜᴅɪᴏ API Rᴇsᴘᴏɴsᴇ JSOɴ"
-        get_url = f"{clean_base}/download?type=audio&url=tum+hi+ho"
-        test_cb = "quick_test:audio:fakira"
+        title = "🎵 MP3 Aᴜᴅɪᴏ API Rᴇsᴘᴏɴsᴇ JSOɴ"
+        get_url = f"{clean_base}/download?type=audio&format=mp3&url=tum+hi+ho"
+        test_cb = "quick_test:mp3:fakira"
+    elif ep_type == "m4a":
+        sample = {
+            "status": "success",
+            "id": "eJuoi13hbBc",
+            "title": "Fakira - Lyrical | Student Of The Year 2 | Tiger Shroff, Tara & Ananya",
+            "duration": "03:30",
+            "duration_sec": 210,
+            "thumbnail": "https://i.ytimg.com/vi/eJuoi13hbBc/hqdefault.jpg",
+            "uploader": "Zee Music Company",
+            "youtube_url": "https://www.youtube.com/watch?v=eJuoi13hbBc",
+            "type": "audio",
+            "quality": "AAC M4A",
+            "filename": "audio_eJuoi13hbBc.m4a",
+            "elapsed_sec": 0.005,
+            "stream_url": f"{clean_base}/media/audio_eJuoi13hbBc.m4a",
+            "developer": OWNER_HANDLE,
+        }
+        title = "📱 M4A Aᴜᴅɪᴏ API Rᴇsᴘᴏɴsᴇ JSOɴ"
+        get_url = f"{clean_base}/download?type=audio&format=m4a&url=tum+hi+ho"
+        test_cb = "quick_test:m4a:fakira"
     elif ep_type == "video":
         sample = {
             "status": "success",
@@ -888,9 +959,15 @@ async def execute_api_test(chat_id: int, input_text: str, forced_mode: Optional[
             if forced_mode == "video":
                 api_label = "Video (720p)"
                 endpoint_path = f"/download?type=video&quality=720&url={urllib.parse.quote(input_text, safe='')}"
-            elif forced_mode == "audio":
+            elif forced_mode in ("audio", "opus"):
+                api_label = "Audio (OPUS HD)"
+                endpoint_path = f"/download?type=audio&format=opus&url={urllib.parse.quote(input_text, safe='')}"
+            elif forced_mode == "mp3":
                 api_label = "Audio (MP3)"
-                endpoint_path = f"/download?type=audio&url={urllib.parse.quote(input_text, safe='')}"
+                endpoint_path = f"/download?type=audio&format=mp3&url={urllib.parse.quote(input_text, safe='')}"
+            elif forced_mode == "m4a":
+                api_label = "Audio (M4A)"
+                endpoint_path = f"/download?type=audio&format=m4a&url={urllib.parse.quote(input_text, safe='')}"
             else:
                 api_label = "Search"
                 endpoint_path = f"/search?query={urllib.parse.quote(input_text, safe='')}"
@@ -899,9 +976,15 @@ async def execute_api_test(chat_id: int, input_text: str, forced_mode: Optional[
         if forced_mode == "video":
             api_label = "Video (720p)"
             endpoint_path = f"/download?type=video&quality=720&url={urllib.parse.quote(input_text, safe='')}"
-        elif forced_mode == "audio":
+        elif forced_mode in ("audio", "opus"):
+            api_label = "Audio (OPUS HD)"
+            endpoint_path = f"/download?type=audio&format=opus&url={urllib.parse.quote(input_text, safe='')}"
+        elif forced_mode == "mp3":
             api_label = "Audio (MP3)"
-            endpoint_path = f"/download?type=audio&url={urllib.parse.quote(input_text, safe='')}"
+            endpoint_path = f"/download?type=audio&format=mp3&url={urllib.parse.quote(input_text, safe='')}"
+        elif forced_mode == "m4a":
+            api_label = "Audio (M4A)"
+            endpoint_path = f"/download?type=audio&format=m4a&url={urllib.parse.quote(input_text, safe='')}"
         elif forced_mode == "playlist":
             api_label = "Playlist"
             endpoint_path = f"/playlist?url={urllib.parse.quote(input_text, safe='')}"
@@ -973,8 +1056,12 @@ async def execute_api_test(chat_id: int, input_text: str, forced_mode: Optional[
         )
         inline_buttons = [
             [
-                {"text": "🎵 Aᴜᴅɪᴏ", "callback_data": f"btn_dl_audio:{vid_id}"},
-                {"text": "🎬 Vɪᴅᴇᴏ", "callback_data": f"btn_ask_vq:{vid_id}"},
+                {"text": "🎙️ OPUS (Studio HD)", "callback_data": f"btn_dl_audio:opus:{vid_id}"},
+                {"text": "🎵 MP3 (320k)", "callback_data": f"btn_dl_audio:mp3:{vid_id}"},
+            ],
+            [
+                {"text": "📱 M4A (AAC)", "callback_data": f"btn_dl_audio:m4a:{vid_id}"},
+                {"text": "🎬 VIDEO (480p)", "callback_data": f"dl_vid:480:{vid_id}"},
             ],
             [
                 {"text": "📄 Vɪᴇᴡ JSOɴ", "callback_data": f"sample_json:search"},
@@ -1073,8 +1160,14 @@ async def handle_callback_query(cq: dict):
 
     # Download & Upload interactive callbacks
     if data.startswith("btn_dl_audio:"):
-        vid_id = data.split(":", 1)[1]
-        asyncio.create_task(download_and_upload_audio(chat_id, vid_id))
+        parts = data.split(":")
+        if len(parts) >= 3:
+            fmt = parts[1]
+            vid_id = parts[2]
+        else:
+            fmt = "opus"
+            vid_id = parts[1]
+        asyncio.create_task(download_and_upload_audio(chat_id, vid_id, audio_format=fmt))
 
     elif data.startswith("btn_ask_vq:"):
         vid_id = data.split(":", 1)[1]
@@ -1097,8 +1190,11 @@ async def handle_callback_query(cq: dict):
         mode = data.split(":", 1)[1]
         USER_STATES[user_id] = {"mode": mode, "expires_at": time.time() + 300}
         mode_labels = {
-            "audio": "🎵 Aᴜᴅɪᴏ (MP3)",
-            "video": "🎬 Vɪᴅᴇᴏ (720p)",
+            "opus": "🎙️ OPUS (Studio HD)",
+            "audio": "🎙️ OPUS (Studio HD)",
+            "mp3": "🎵 MP3 (320k)",
+            "m4a": "📱 M4A (AAC)",
+            "video": "🎬 Vɪᴅᴇᴏ (480p)",
             "search": "🔍 Sᴇᴀʀᴄʜ (Fast Meta)",
             "playlist": "📑 Pʟᴀʏʟɪsᴛ (25 Songs)"
         }

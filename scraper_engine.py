@@ -316,10 +316,12 @@ async def download_via_loader(
     media_type: str = "audio",
     quality: Optional[str] = None,
     target_path: Optional[Path] = None,
+    audio_format: Optional[str] = None,
 ) -> bool:
     """
     Multi-Format Web Scraper Engine (Zero-Cookie, 100% Bypass).
     Directly converts and downloads media via Loader CDN.
+    Supports: opus (Rank #1 Studio HD), mp3, m4a (AAC), flac, wav, and video (480, 720, 1080).
     Guaranteed to bypass YouTube datacenter IP bot blocks and 403 Forbidden errors.
     Fully async and non-blocking for multi-tab parallel downloads.
     """
@@ -328,7 +330,7 @@ async def download_via_loader(
     if media_type.lower() == "video":
         fmt = quality if quality in ("360", "480", "720", "1080") else "480"
     else:
-        fmt = "mp3"
+        fmt = audio_format.lower() if audio_format and audio_format.lower() in ("opus", "mp3", "m4a", "flac", "wav") else "opus"
 
     init_url = f"https://loader.to/ajax/download.php?format={fmt}&url={urllib.parse.quote(clean_url)}"
     headers = {

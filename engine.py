@@ -7,7 +7,14 @@ from typing import Dict, Any, Optional
 from pathlib import Path
 
 from config import CACHE_DIR, DEFAULT_TIMEOUT_SEC
-from cache_manager import get_cache_filename, get_cache_path, is_cached, get_download_lock
+from cache_manager import (
+    get_cache_filename,
+    get_cache_path,
+    is_cached,
+    find_cached_video,
+    find_cached_audio,
+    get_download_lock,
+)
 import controller_db
 from scraper_engine import (
     extract_video_id,
@@ -83,20 +90,27 @@ async def resolve_metadata_async(query: str) -> Dict[str, Any]:
     raise ValueError(f"Could not resolve video for query: {query}")
 
 
-async def download_media_async(video_id: str, media_type: str = "audio", quality: Optional[str] = None) -> str:
+async def download_media_async(
+    video_id: str,
+    media_type: str = "audio",
+    quality: Optional[str] = None,
+    audio_format: Optional[str] = "opus",
+) -> str:
     """
     Dedicated High-Speed Web Scraper Downloader:
     Zero cookies, zero 403 Forbidden errors, 100% pure web scraper engine.
     Runs fully parallel for concurrent multi-tab requests.
+    Supports audio formats: opus (default), mp3, m4a, flac, wav.
     """
-    filename = get_cache_filename(video_id, media_type)
+    ext = audio_format if media_type == "audio" else "mp4"
+    filename = get_cache_filename(video_id, media_type, ext=ext)
     target_path = get_cache_path(filename)
 
     if is_cached(filename):
         return filename
 
-    logger.info(f"Downloading {video_id} [{media_type}] via Web Scraper Engine (Parallel Task)...")
-    success = await download_via_loader(video_id, media_type, quality, target_path)
+    logger.info(f"Downloading {video_id} [{media_type} - {ext}] via Web Scraper Engine (Parallel Task)...")
+    success = await download_via_loader(video_id, media_type, quality, target_path, audio_format=audio_format)
     if success and target_path.exists() and target_path.stat().st_size > 1024:
         return filename
 
@@ -106,18 +120,35 @@ async def download_media_async(video_id: str, media_type: str = "audio", quality
 async def resolve_and_download(
     query: str,
     media_type: str = "audio",
-    quality: Optional[str] = None
+    quality: Optional[str] = None,
+    audio_format: Optional[str] = "opus",
 ) -> Dict[str, Any]:
     """
     Main entry point with instant sub-millisecond cache returns:
     1. Check if query is a video ID, URL, or mapped song title in SQLite database.
-    2. If file already exists on NVMe disk and metadata in DB: Return in 0.001s!
-    3. If file not on disk: Resolve metadata, download, and register into DB for future instant hits.
+    2. Smart Video Caching: If ANY video resolution exists in NVMe cache (480p/720p/1080p),
+       instantly return existing video in <0.005s without re-downloading!
+    3. Audio Caching: Checks for requested audio format (opus, mp3, m4a).
+    4. If file not on disk: Resolve metadata, download, and register into DB for future instant hits.
     """
     t_start = time.time()
     clean = query.strip()
     media_type = "video" if media_type.lower() == "video" else "audio"
-    quality_label = f"{quality}p" if media_type == "video" else "192kbps"
+    audio_fmt = (audio_format or "opus").lower()
+    if audio_fmt not in ("opus", "mp3", "m4a", "flac", "wav"):
+        audio_fmt = "opus"
+
+    if media_type == "video":
+        quality_label = f"{quality}p" if quality else "480p"
+    else:
+        if audio_fmt == "opus":
+            quality_label = "Studio HD (48kHz Opus)"
+        elif audio_fmt == "mp3":
+            quality_label = "320kbps MP3"
+        elif audio_fmt == "m4a":
+            quality_label = "AAC M4A"
+        else:
+            quality_label = f"{audio_fmt.upper()} Audio"
 
     # Step 1: Direct video ID extraction (e.g. from YouTube URL or raw 11-char ID)
     video_id = extract_video_id(clean)
@@ -128,8 +159,17 @@ async def resolve_and_download(
 
     # Step 3: Fast Disk & Database Cache Check
     if video_id:
-        filename = get_cache_filename(video_id, media_type)
-        if is_cached(filename):
+        cached_file = None
+        if media_type == "video":
+            # Smart Video Caching: Reuse ANY existing video file (480p, 720p, etc.)
+            cached_file = find_cached_video(video_id)
+        else:
+            # Check audio file
+            target_fname = get_cache_filename(video_id, "audio", ext=audio_fmt)
+            if is_cached(target_fname):
+                cached_file = target_fname
+
+        if cached_file and is_cached(cached_file):
             db_media = controller_db.get_media_cache(video_id)
             if db_media and db_media.get("title") and not db_media["title"].startswith("YouTube Audio ("):
                 # Save query mapping so next search hits immediately
@@ -137,7 +177,7 @@ async def resolve_and_download(
                     controller_db.save_query_mapping(clean, video_id)
 
                 elapsed = round(time.time() - t_start, 3)
-                logger.info(f"[INSTANT CACHE HIT ⚡] {video_id} ('{db_media['title']}') returned in {elapsed}s")
+                logger.info(f"[INSTANT CACHE HIT ⚡] {video_id} ('{db_media['title']}') [{cached_file}] returned in {elapsed}s")
                 return {
                     "status": "success",
                     "id": video_id,
@@ -149,13 +189,13 @@ async def resolve_and_download(
                     "youtube_url": db_media["youtube_url"] or f"https://www.youtube.com/watch?v={video_id}",
                     "type": media_type,
                     "quality": quality_label,
-                    "filename": filename,
+                    "filename": cached_file,
                     "elapsed_sec": elapsed,
                     "_cached": True,
                 }
             else:
                 # File is already on disk from previous downloads, but DB metadata needs enrichment
-                logger.info(f"[DISK HIT 💽] {filename} exists on disk. Enriching metadata...")
+                logger.info(f"[DISK HIT 💽] {cached_file} exists on disk. Enriching metadata...")
                 try:
                     meta = await resolve_metadata_async(video_id)
                 except Exception:
@@ -176,8 +216,8 @@ async def resolve_and_download(
                     thumbnail=meta["thumbnail"],
                     uploader=meta["uploader"],
                     youtube_url=meta["webpage_url"],
-                    audio_file=filename if media_type == "audio" else None,
-                    video_file=filename if media_type == "video" else None,
+                    audio_file=cached_file if media_type == "audio" else None,
+                    video_file=cached_file if media_type == "video" else None,
                 )
                 if clean != video_id and not clean.startswith("http"):
                     controller_db.save_query_mapping(clean, video_id)
@@ -193,7 +233,7 @@ async def resolve_and_download(
                     "youtube_url": meta["webpage_url"],
                     "type": media_type,
                     "quality": quality_label,
-                    "filename": filename,
+                    "filename": cached_file,
                     "elapsed_sec": elapsed,
                     "_cached": True,
                 }
@@ -201,15 +241,20 @@ async def resolve_and_download(
     # Step 4: Not cached yet - resolve metadata from web
     meta = await resolve_metadata_async(query)
     video_id = meta["id"]
-    filename = get_cache_filename(video_id, media_type)
+
+    if media_type == "video":
+        cached_vid = find_cached_video(video_id)
+        filename = cached_vid if cached_vid else get_cache_filename(video_id, "video", ext="mp4")
+    else:
+        filename = get_cache_filename(video_id, "audio", ext=audio_fmt)
 
     cached = is_cached(filename)
     if not cached:
         lock = await get_download_lock(filename)
         async with lock:
             if not is_cached(filename):
-                logger.info(f"Processing [{media_type}] for ID: {video_id} ('{meta['title']}')")
-                await download_media_async(video_id, media_type, quality)
+                logger.info(f"Processing [{media_type} - {audio_fmt if media_type == 'audio' else quality}] for ID: {video_id} ('{meta['title']}')")
+                await download_media_async(video_id, media_type, quality, audio_format=audio_fmt)
             cached = False
     else:
         cached = True
@@ -249,3 +294,4 @@ async def resolve_and_download(
         "elapsed_sec": elapsed,
         "_cached": cached,
     }
+

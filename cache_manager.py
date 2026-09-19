@@ -18,7 +18,7 @@ _global_lock = asyncio.Lock()
 def get_cache_filename(media_id: str, media_type: str, ext: Optional[str] = None) -> str:
     """
     Generate file name following user specification:
-    audio -> audio_{id}.mp3 (or given ext)
+    audio -> audio_{id}.opus (default) or .mp3, .m4a
     video -> video_{id}.mp4
     """
     clean_id = "".join(c for c in media_id if c.isalnum() or c in ("-", "_"))
@@ -26,7 +26,7 @@ def get_cache_filename(media_id: str, media_type: str, ext: Optional[str] = None
         extension = ext if ext else "mp4"
         return f"video_{clean_id}.{extension}"
     else:
-        extension = ext if ext else "mp3"
+        extension = ext if ext else "opus"
         return f"audio_{clean_id}.{extension}"
 
 
@@ -41,6 +41,35 @@ def is_cached(filename: str) -> bool:
         return filepath.is_file() and filepath.stat().st_size > 1024  # At least 1KB
     except Exception:
         return False
+
+
+def find_cached_video(media_id: str) -> Optional[str]:
+    """
+    Checks if ANY video file already exists in local cache for this ID.
+    Reuses existing 480p video even if 720p/1080p is requested, avoiding re-downloads!
+    """
+    clean_id = "".join(c for c in media_id if c.isalnum() or c in ("-", "_"))
+    for ext in ("mp4", "mkv", "webm"):
+        fname = f"video_{clean_id}.{ext}"
+        if is_cached(fname):
+            return fname
+    return None
+
+
+def find_cached_audio(media_id: str, preferred_format: str = "opus") -> Optional[str]:
+    """
+    Checks if audio already exists in local cache for this ID.
+    Prioritizes requested format (opus, mp3, m4a).
+    """
+    clean_id = "".join(c for c in media_id if c.isalnum() or c in ("-", "_"))
+    pref_file = f"audio_{clean_id}.{preferred_format.lower()}"
+    if is_cached(pref_file):
+        return pref_file
+    for ext in ("opus", "m4a", "mp3", "flac", "wav"):
+        fname = f"audio_{clean_id}.{ext}"
+        if is_cached(fname):
+            return fname
+    return None
 
 
 async def get_download_lock(filename: str) -> asyncio.Lock:

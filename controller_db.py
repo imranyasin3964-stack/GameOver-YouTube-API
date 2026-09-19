@@ -385,12 +385,16 @@ def scan_and_index_cache_directory(cache_dir: Path):
             name = entry.name
             vid = None
             media_type = None
-            if name.startswith("audio_") and name.endswith(".mp3"):
-                vid = name[6:-4]
-                media_type = "audio"
-            elif name.startswith("video_") and name.endswith(".mp4"):
-                vid = name[6:-4]
-                media_type = "video"
+            if name.startswith("audio_"):
+                parts = name.rsplit(".", 1)
+                if len(parts) == 2 and parts[1].lower() in ("opus", "mp3", "m4a", "flac", "wav"):
+                    vid = parts[0][6:]
+                    media_type = "audio"
+            elif name.startswith("video_"):
+                parts = name.rsplit(".", 1)
+                if len(parts) == 2 and parts[1].lower() in ("mp4", "mkv", "webm"):
+                    vid = parts[0][6:]
+                    media_type = "video"
 
             if vid and len(vid) >= 6:
                 cursor.execute("SELECT * FROM media_cache WHERE video_id = ?", (vid,))
@@ -402,7 +406,7 @@ def scan_and_index_cache_directory(cache_dir: Path):
                         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)",
                         (
                             vid,
-                            f"YouTube Audio ({vid})",
+                            f"YouTube {media_type.capitalize()} ({vid})",
                             "03:30",
                             210,
                             f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
@@ -416,8 +420,10 @@ def scan_and_index_cache_directory(cache_dir: Path):
                     )
                     count += 1
                 else:
-                    if media_type == "audio" and not existing["audio_file"]:
-                        cursor.execute("UPDATE media_cache SET audio_file = ? WHERE video_id = ?", (name, vid))
+                    if media_type == "audio":
+                        # If opus, prioritize setting as main audio file
+                        if name.endswith(".opus") or not existing["audio_file"]:
+                            cursor.execute("UPDATE media_cache SET audio_file = ? WHERE video_id = ?", (name, vid))
                     elif media_type == "video" and not existing["video_file"]:
                         cursor.execute("UPDATE media_cache SET video_file = ? WHERE video_id = ?", (name, vid))
         conn.commit()

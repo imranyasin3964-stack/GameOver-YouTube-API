@@ -14,6 +14,8 @@ BASE_URL = os.getenv("BASE_URL", "http://172.104.38.31")
 # Cache & Storage limits (50 GB Capacity, Permanent Storage - No Auto-Delete)
 MAX_CACHE_SIZE_GB = float(os.getenv("MAX_CACHE_SIZE_GB", "50.0"))  # Alert threshold at 50GB
 
-# Downloader / yt-dlp Settings
+# Downloader & Audio Settings
 DEFAULT_TIMEOUT_SEC = 25
 CONCURRENT_DOWNLOADS = 5
+DEFAULT_AUDIO_FORMAT = "opus"  # Rank #1 Native Telegram 48kHz Studio HD
+SUPPORTED_AUDIO_FORMATS = ("opus", "mp3", "m4a", "flac", "wav")

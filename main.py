@@ -184,16 +184,17 @@ async def home_dashboard():
                 <h2>⚡ Fast API Endpoints</h2>
                 <p>Use these endpoints directly in your Telegram Music Bot:</p>
 
-                <h3>1. Audio Download (Default)</h3>
-                <pre>GET /download?type=audio&url=tum+ho</pre>
-                <p>Or by YouTube ID:</p>
-                <pre>GET /download?type=audio&url=sK7riqg2mr4</pre>
+                <h3>1. Audio Download (OPUS - Rank #1 48kHz Studio HD Default)</h3>
+                <pre>GET /download?type=audio&format=opus&url=tum+ho</pre>
+                <p>MP3 (320k) or M4A (AAC):</p>
+                <pre>GET /download?type=audio&format=mp3&url=tum+ho</pre>
+                <pre>GET /download?type=audio&format=m4a&url=tum+ho</pre>
 
-                <h3>2. Video Download (480p / 360p / 720p)</h3>
+                <h3>2. Video Download (480p / 360p / 720p - Smart Cache Reuse)</h3>
                 <pre>GET /download?type=video&quality=480&url=5dYirJj0I9M</pre>
 
                 <h3>3. Media Stream URL Format</h3>
-                <p>Audio is streamed as: <code>/media/audio_{{id}}.mp3</code></p>
+                <p>Audio is streamed as: <code>/media/audio_{{id}}.opus</code> (or .mp3 / .m4a)</p>
                 <p>Video is streamed as: <code>/media/video_{{id}}.mp4</code></p>
             </div>
         </div>
@@ -482,14 +483,15 @@ async def playlist_media(
 async def download_media(
     request: Request,
     type: str = Query("audio", description="Media type: 'audio' (default) or 'video'"),
+    format: Optional[str] = Query(None, description="Audio format: 'opus' (default, 48kHz HD), 'mp3', 'm4a', 'flac', 'wav'"),
     quality: Optional[str] = Query(None, description="Video quality (480, 360, 720) or Audio bitrate"),
     stream: bool = Query(False, description="If true, directly streams bytes. If false, returns JSON"),
     url: Optional[str] = Query(None, description="YouTube Video ID, Full URL, or Song Search title (Placed at end)"),
 ):
     """
     Unified Resolution and Download Endpoint:
-    Order of query parameters: ?type=video&quality=480&url=...
-    Default: ?type=audio&url=...
+    Order of query parameters: ?type=audio&format=opus&url=...
+    Default: ?type=audio&url=... (defaults to OPUS 48kHz Studio HD)
     """
     # If url is missing from explicit param, try to extract from raw query string
     target_url = url
@@ -501,7 +503,7 @@ async def download_media(
     if not target_url or not target_url.strip():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Missing required query parameter: 'url' (e.g. ?type=audio&url=tum+ho)"
+            detail="Missing required query parameter: 'url' (e.g. ?type=audio&format=opus&url=tum+ho)"
         )
 
     client_ip = request.client.host if request.client else "127.0.0.1"
@@ -523,9 +525,18 @@ async def download_media(
     if media_type == "video" and not quality:
         quality = "480"
 
+    audio_fmt = (format or "opus").lower() if media_type == "audio" else None
+    if audio_fmt and audio_fmt not in ("opus", "mp3", "m4a", "flac", "wav"):
+        audio_fmt = "opus"
+
     start_time_req = time.time()
     try:
-        result = await resolve_and_download(clean_query, media_type=media_type, quality=quality)
+        result = await resolve_and_download(
+            clean_query,
+            media_type=media_type,
+            quality=quality,
+            audio_format=audio_fmt
+        )
     except Exception as e:
         logger.error(f"Resolution failed for query '{clean_query}' [{media_type}]: {e}", exc_info=True)
         raise HTTPException(
@@ -548,7 +559,7 @@ async def download_media(
         "ip": client_ip,
         "query": clean_query,
         "type": media_type,
-        "quality": quality or "default",
+        "quality": quality if media_type == "video" else (audio_fmt or "opus"),
         "cached": is_cached_status,
         "elapsed_sec": elapsed,
         "title": result.get("title", clean_query),
@@ -570,7 +581,7 @@ async def stream_media_file(filename: str, request: Request):
     High-Performance Media Streaming with full HTTP 206 Partial Content (Range) support.
     Essential for Telegram Voice/Video WebRTC playback.
     Filename pattern:
-    - audio_{id}.mp3
+    - audio_{id}.opus / audio_{id}.mp3 / audio_{id}.m4a
     - video_{id}.mp4
     """
     # Sanitize filename
@@ -595,8 +606,16 @@ def range_requests_response(request: Request, file_path: Path):
         content_type = "image/png"
     elif suffix == ".webp":
         content_type = "image/webp"
-    elif suffix == ".mp4":
+    elif suffix in (".mp4", ".mkv"):
         content_type = "video/mp4"
+    elif suffix == ".opus":
+        content_type = "audio/opus"
+    elif suffix == ".m4a":
+        content_type = "audio/mp4"
+    elif suffix == ".flac":
+        content_type = "audio/flac"
+    elif suffix == ".wav":
+        content_type = "audio/wav"
     else:
         content_type = "audio/mpeg"
 
