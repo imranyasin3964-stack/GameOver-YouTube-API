@@ -260,9 +260,15 @@ async def download_and_upload_audio(chat_id: int, video_id: str, title: str = ""
     data = None
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=60.0)) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
+            try:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=60.0)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+            except (aiohttp.ClientConnectorError, aiohttp.ServerDisconnectedError):
+                remote_url = f"{BASE_URL.rstrip('/')}/download?type=audio&format={audio_format.lower()}&url=https://www.youtube.com/watch?v={video_id}"
+                async with session.get(remote_url, timeout=aiohttp.ClientTimeout(total=60.0)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
     except Exception as e:
         logger.error(f"Download audio error: {e}")
 
@@ -353,9 +359,15 @@ async def download_and_upload_video(chat_id: int, video_id: str, quality: str = 
     data = None
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=120.0)) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
+            try:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=120.0)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+            except (aiohttp.ClientConnectorError, aiohttp.ServerDisconnectedError):
+                remote_url = f"{BASE_URL.rstrip('/')}/download?type=video&quality={quality}&url=https://www.youtube.com/watch?v={video_id}"
+                async with session.get(remote_url, timeout=aiohttp.ClientTimeout(total=120.0)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
     except Exception as e:
         logger.error(f"Download video error: {e}")
 
@@ -1207,12 +1219,14 @@ async def handle_callback_query(cq: dict):
     user_id = from_user["id"]
     data = cq.get("data", "")
     msg = cq.get("message", {})
-    chat_id = msg.get("chat", {}).get("id")
+    chat_id = msg.get("chat", {}).get("id") if msg else user_id
+    if not chat_id:
+        chat_id = user_id
 
     # Answer callback instantly to remove loading animation without waiting
     asyncio.create_task(call_tg("answerCallbackQuery", {"callback_query_id": cq_id}))
 
-    is_adm, role = controller_db.is_admin(user_id)
+    is_adm, role = (True, "owner") if user_id == OWNER_ID else controller_db.is_admin(user_id)
     if not is_adm:
         await send_msg(chat_id, "🚫 <b>Aᴄᴄᴇss Dᴇɴɪᴇᴅ:</b> Yᴏᴜ ᴀʀᴇ ɴᴏᴛ ᴀɴ ᴀᴜᴛʜᴏʀɪᴢᴇᴅ ᴀᴅᴍɪɴ.")
         return
@@ -1291,10 +1305,32 @@ async def handle_callback_query(cq: dict):
         new_state = not bool(ip_info and ip_info.get("is_blocked"))
         controller_db.set_ip_block(ip, new_state)
         status_txt = "🚫 Bʟᴏᴄᴋᴇᴅ" if new_state else "✅ Uɴʙʟᴏᴄᴋᴇᴅ"
-        await send_msg(chat_id, f"🌐 IP <code>{ip}</code> ɪs ɴᴏᴡ <b>{status_txt}</b>!")
-        # If toggled from inside an OSINT inspector card, re-render it
-        if msg.get("message_id"):
-            await handle_ip_lookup(chat_id, ip, message_id_to_edit=msg.get("message_id"))
+        toast_txt = f"IP {ip} is now {'Blocked' if new_state else 'Unblocked'}!"
+        asyncio.create_task(call_tg("answerCallbackQuery", {"callback_query_id": cq_id, "text": toast_txt}))
+
+        msg_text = msg.get("text", "")
+        if "IP Iɴsᴘᴇᴄᴛᴏʀ" in msg_text or "OSINT" in msg_text:
+            if msg.get("message_id"):
+                await handle_ip_lookup(chat_id, ip, message_id_to_edit=msg.get("message_id"))
+        else:
+            # Update inline button on the log message so it flips immediately
+            btn_text = f"✅ Uɴʙʟᴏᴄᴋ {ip}" if new_state else f"🚫 Bʟᴏᴄᴋ {ip}"
+            new_kb = {
+                "inline_keyboard": [
+                    [
+                        {"text": btn_text, "callback_data": f"toggle_block:{ip}"},
+                        {"text": "ℹ️ IP Iɴғᴏ", "callback_data": f"ip_menu:{ip}"}
+                    ],
+                    [{"text": f"⏱️ Lɪᴍɪᴛ {ip}", "callback_data": f"select_limit:{ip}"}],
+                ]
+            }
+            if msg.get("message_id"):
+                await call_tg("editMessageReplyMarkup", {
+                    "chat_id": chat_id,
+                    "message_id": msg["message_id"],
+                    "reply_markup": new_kb
+                })
+            await send_msg(chat_id, f"🌐 IP <code>{ip}</code> ɪs ɴᴏᴡ <b>{status_txt}</b>!")
 
     elif data.startswith("unblock:"):
         ip = data.split(":", 1)[1]
@@ -1303,7 +1339,12 @@ async def handle_callback_query(cq: dict):
 
     elif data.startswith("ip_menu:"):
         ip = data.split(":", 1)[1]
-        await handle_ip_lookup(chat_id, ip, message_id_to_edit=msg.get("message_id"))
+        msg_text = msg.get("text", "")
+        if "IP Iɴsᴘᴇᴄᴛᴏʀ" in msg_text or "OSINT" in msg_text:
+            await handle_ip_lookup(chat_id, ip, message_id_to_edit=msg.get("message_id"))
+        else:
+            # Send fresh IP Inspector card so log history is preserved
+            await handle_ip_lookup(chat_id, ip, message_id_to_edit=None)
 
     elif data == "ips_list_menu":
         await handle_ips_list(chat_id)
@@ -1344,7 +1385,7 @@ async def handle_message(msg: dict):
     if not user_id or not chat_id or not text:
         return
 
-    is_adm, role = controller_db.is_admin(user_id)
+    is_adm, role = (True, "owner") if user_id == OWNER_ID else controller_db.is_admin(user_id)
     if not is_adm:
         await send_msg(
             chat_id,
@@ -1569,7 +1610,11 @@ async def telegram_polling_loop():
     while True:
         try:
             url = f"{TELEGRAM_API_URL}/getUpdates"
-            payload = {"offset": offset, "timeout": 20}
+            payload = {
+                "offset": offset,
+                "timeout": 20,
+                "allowed_updates": ["message", "edited_message", "callback_query", "inline_query"]
+            }
             async with aiohttp.ClientSession() as session:
                 async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=25.0)) as resp:
                     if resp.status == 200:
