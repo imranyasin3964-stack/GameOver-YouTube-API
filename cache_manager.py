@@ -58,17 +58,13 @@ def find_cached_video(media_id: str) -> Optional[str]:
 
 def find_cached_audio(media_id: str, preferred_format: str = "opus") -> Optional[str]:
     """
-    Checks if audio already exists in local cache for this ID.
-    Prioritizes requested format (opus, mp3, m4a).
+    Checks if audio already exists in local cache for this ID in the requested format.
+    Strictly checks requested format (e.g. m4a, opus, mp3) so formats never get mixed up!
     """
     clean_id = "".join(c for c in media_id if c.isalnum() or c in ("-", "_"))
     pref_file = f"audio_{clean_id}.{preferred_format.lower()}"
     if is_cached(pref_file):
         return pref_file
-    for ext in ("opus", "m4a", "mp3", "flac", "wav"):
-        fname = f"audio_{clean_id}.{ext}"
-        if is_cached(fname):
-            return fname
     return None
 
 

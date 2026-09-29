@@ -355,8 +355,8 @@ async def download_via_loader(
                 if not progress_url:
                     return False
 
-            # Ultra-fast polling: 0.2s initial, then 0.4s intervals
-            for attempt in range(60):
+            # Ultra-fast polling: 0.2s initial, then 0.4s intervals (up to ~36s)
+            for attempt in range(90):
                 await asyncio.sleep(0.2 if attempt == 0 else 0.4)
                 try:
                     async with session.get(progress_url, timeout=aiohttp.ClientTimeout(total=4.0)) as resp2:
@@ -749,11 +749,83 @@ async def fetch_youtubei_search(session: aiohttp.ClientSession, query: str, max_
         return []
 
 
+async def fetch_youtube_upnext_feed(session: aiohttp.ClientSession, video_id: str) -> List[Dict[str, Any]]:
+    """
+    Scrapes YouTube's official Up-Next and Radio Mix recommendation feed via InnerTube.
+    Returns genuine related songs YouTube actually recommends next for this video!
+    """
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36',
+        'Accept-Language': 'en-US,en;q=0.9',
+    }
+    payload = {
+        'context': {'client': {'clientName': 'WEB', 'clientVersion': '2.20240726.00.00', 'hl': 'en', 'gl': 'US'}},
+        'videoId': video_id,
+        'playlistId': f"RD{video_id}"
+    }
+    feed_items = []
+    continuation_token = None
+    try:
+        async with session.post('https://www.youtube.com/youtubei/v1/next', json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=4.5)) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                def scan(obj):
+                    nonlocal continuation_token
+                    if isinstance(obj, dict):
+                        if 'playlistPanelVideoRenderer' in obj:
+                            feed_items.append(obj['playlistPanelVideoRenderer'])
+                        elif 'compactVideoRenderer' in obj:
+                            feed_items.append(obj['compactVideoRenderer'])
+                        elif 'videoWithContextRenderer' in obj:
+                            feed_items.append(obj['videoWithContextRenderer'])
+                        elif 'continuationCommand' in obj:
+                            continuation_token = obj['continuationCommand'].get('token')
+                        for v in obj.values():
+                            scan(v)
+                    elif isinstance(obj, list):
+                        for itm in obj:
+                            scan(itm)
+                scan(data)
+    except Exception as e:
+        logger.debug(f"[YouTubeFeed] Error fetching YouTube feed: {e}")
+
+    if continuation_token and len(feed_items) < 30:
+        try:
+            cont_payload = {
+                'context': payload['context'],
+                'continuation': continuation_token
+            }
+            async with session.post('https://www.youtube.com/youtubei/v1/next', json=cont_payload, headers=headers, timeout=aiohttp.ClientTimeout(total=3.5)) as resp2:
+                if resp2.status == 200:
+                    data2 = await resp2.json()
+                    scan(data2)
+        except Exception:
+            pass
+
+    out = []
+    seen = set([video_id])
+    for v in feed_items:
+        vid = v.get('videoId')
+        if not vid or len(vid) != 11 or vid in seen:
+            continue
+        seen.add(vid)
+        t = v.get('title', {}) or v.get('headline', {})
+        title = t.get('simpleText') or "".join(x.get('text', '') for x in t.get('runs', []))
+        d = v.get('lengthText', {})
+        dur = d.get('simpleText') or "".join(x.get('text', '') for x in d.get('runs', [])) or "03:30"
+        b = v.get('shortBylineText', {}) or v.get('longBylineText', {}) or v.get('ownerText', {})
+        by = "".join(x.get('text', '') for x in b.get('runs', [])) or "YouTube"
+        out.append({'id': vid, 'title': title, 'duration': dur, 'uploader': by})
+
+    return out
+
+
 async def resolve_smart_autoplay(seed_query: str, target_count: int = 35) -> Dict[str, Any]:
     """
     Dedicated Smart Vibe Autoplay Resolver Engine:
     - Resolves seed song name or YouTube URL.
-    - Generates targeted genre queries and fetches 100+ candidates in parallel via InnerTube.
+    - Fetches official YouTube Up-Next recommendation feed directly from YouTube.
+    - Generates targeted genre queries and fetches additional candidates in parallel.
     - Anti-Spam Vibe Filtering:
       * Filters out duplicate variations and seed song.
       * Prevents consecutive songs from the same movie/album.
@@ -792,15 +864,16 @@ async def resolve_smart_autoplay(seed_query: str, target_count: int = 35) -> Dic
         # Step 2: Generate dynamic vibe queries
         vibe_queries = detect_vibe_queries(clean, seed_title, seed_uploader)
 
-        # Step 3: Fetch candidate songs concurrently in parallel
-        tasks = [fetch_youtubei_search(session, q, max_items=25) for q in vibe_queries]
-        batch_results = await asyncio.gather(*tasks)
+        # Step 3: Fetch YouTube Official Recommendation Feed + Vibe Search in Parallel
+        feed_task = fetch_youtube_upnext_feed(session, seed_id)
+        search_tasks = [fetch_youtubei_search(session, q, max_items=25) for q in vibe_queries]
+        feed_videos, *search_results = await asyncio.gather(feed_task, *search_tasks)
 
-        # Interleave round-robin across queries for maximum artist and movie diversity
-        raw_candidates = []
-        max_len = max((len(r) for r in batch_results), default=0)
+        # Place YouTube's genuine recommendation feed items first, followed by interleaved vibe matches
+        raw_candidates = list(feed_videos)
+        max_len = max((len(r) for r in search_results), default=0)
         for i in range(max_len):
-            for batch in batch_results:
+            for batch in search_results:
                 if i < len(batch):
                     raw_candidates.append(batch[i])
 
