@@ -8,3 +8,5 @@ pydub>=0.25.1
 SpeechRecognition>=3.10.0
 playwright>=1.40.0
 aiohttp>=3.9.0
+kurigram>=2.2.26
+TgCrypto>=1.2.5

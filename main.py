@@ -260,6 +260,7 @@ async def health_check():
         "ram_available_mb": round(vm.available / (1024 ** 2), 1),
         "cache": cache_stats,
         "port": PORT,
+        "net_env": {k: os.environ[k] for k in os.environ if any(p in k.lower() for p in ("proxy", "http", "host", "space")) and "TOKEN" not in k and "SECRET" not in k}
     }
 
 

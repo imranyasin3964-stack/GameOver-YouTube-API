@@ -10,15 +10,26 @@ import socket
 import requests
 from typing import Optional, Dict, Any, List
 
+from pyrogram import Client, filters
+from pyrogram.enums import ParseMode
+from pyrogram.types import (
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardRemove,
+)
+
 import controller_db
 from cache_manager import get_cache_stats
 from config import BASE_URL, PORT, CACHE_DIR, CF_WORKER_URL
 
 logger = logging.getLogger("GameOverAPI.TelegramBot")
 
+API_ID = 37206917
+API_HASH = "bad0181a6c1149585fc8211485b57a7d"
 BOT_TOKEN = "8718878406:AAGOPBTJw1XQv45i5RBf01fGbpHfHbAbM5k"
 TELEGRAM_API_DIRECT_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
-# Support both direct connection (IPv4 forced) and Cloudflare proxy fallback
 if CF_WORKER_URL:
     TELEGRAM_API_URL = f"{CF_WORKER_URL.rstrip('/')}/telegram/bot{BOT_TOKEN}"
 else:
@@ -26,6 +37,8 @@ else:
 
 OWNER_ID = 6805412676
 OWNER_HANDLE = "@XHamsterFounders"
+
+tg_client: Optional[Client] = None
 
 # Session state for interactive button input (e.g. setting custom limit or test mode)
 USER_STATES: Dict[int, Dict[str, Any]] = {}
@@ -45,54 +58,156 @@ def get_main_keyboard() -> dict:
     }
 
 
+def parse_reply_markup(markup):
+    """Converts raw dict, JSON or Pyrogram markup into proper Pyrogram Markup objects"""
+    if not markup:
+        return None
+    if isinstance(markup, (InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove)):
+        return markup
+    if isinstance(markup, str):
+        try:
+            markup = json.loads(markup)
+        except Exception:
+            return None
+    if isinstance(markup, dict):
+        if "inline_keyboard" in markup:
+            rows = []
+            for row in markup["inline_keyboard"]:
+                btn_row = []
+                for btn in row:
+                    text = btn.get("text", "")
+                    url = btn.get("url")
+                    callback_data = btn.get("callback_data")
+                    if url:
+                        btn_row.append(InlineKeyboardButton(text=text, url=url))
+                    elif callback_data is not None:
+                        btn_row.append(InlineKeyboardButton(text=text, callback_data=str(callback_data)))
+                    else:
+                        btn_row.append(InlineKeyboardButton(text=text, callback_data="none"))
+                if btn_row:
+                    rows.append(btn_row)
+            return InlineKeyboardMarkup(rows)
+        elif "keyboard" in markup:
+            rows = []
+            for row in markup["keyboard"]:
+                btn_row = [KeyboardButton(btn.get("text", "")) for btn in row if btn.get("text")]
+                if btn_row:
+                    rows.append(btn_row)
+            return ReplyKeyboardMarkup(
+                rows,
+                resize_keyboard=markup.get("resize_keyboard", True),
+                one_time_keyboard=markup.get("one_time_keyboard", False)
+            )
+        elif markup.get("remove_keyboard"):
+            return ReplyKeyboardRemove()
+    return None
+
+
 async def call_tg(method: str, payload: dict) -> Optional[dict]:
-    """Helper to make Telegram Bot API requests via IPv4-forced aiohttp with requests fallback"""
-    urls_to_try = [
-        f"{TELEGRAM_API_DIRECT_URL}/{method}",
-    ]
+    """Helper executing Telegram actions via native Pyrogram MTProto (with HTTP fallback)"""
+    global tg_client
+    if tg_client and tg_client.is_connected:
+        try:
+            if method == "sendMessage":
+                raw_chat_id = payload.get("chat_id")
+                chat_id = int(raw_chat_id) if str(raw_chat_id).lstrip("-").isdigit() else raw_chat_id
+                text = payload.get("text", "")
+                if len(text) > 4000:
+                    text = text[:4000] + "\n..."
+                kb = parse_reply_markup(payload.get("reply_markup"))
+                disable_preview = payload.get("disable_web_page_preview", True)
+                kwargs = {}
+                if kb is not None:
+                    kwargs["reply_markup"] = kb
+                if disable_preview:
+                    kwargs["disable_web_page_preview"] = True
+                msg = await tg_client.send_message(chat_id, text, parse_mode=ParseMode.HTML, **kwargs)
+                return {"ok": True, "result": {"message_id": msg.id}}
+
+            elif method == "editMessageText":
+                raw_chat_id = payload.get("chat_id")
+                chat_id = int(raw_chat_id) if str(raw_chat_id).lstrip("-").isdigit() else raw_chat_id
+                message_id = int(payload.get("message_id", 0))
+                text = payload.get("text", "")
+                if len(text) > 4000:
+                    text = text[:4000] + "\n..."
+                kb = parse_reply_markup(payload.get("reply_markup"))
+                disable_preview = payload.get("disable_web_page_preview", True)
+                kwargs = {}
+                if kb is not None:
+                    kwargs["reply_markup"] = kb
+                if disable_preview:
+                    kwargs["disable_web_page_preview"] = True
+                msg = await tg_client.edit_message_text(chat_id, message_id, text, parse_mode=ParseMode.HTML, **kwargs)
+                return {"ok": True, "result": {"message_id": msg.id if msg else message_id}}
+
+            elif method == "editMessageReplyMarkup":
+                raw_chat_id = payload.get("chat_id")
+                chat_id = int(raw_chat_id) if str(raw_chat_id).lstrip("-").isdigit() else raw_chat_id
+                message_id = int(payload.get("message_id", 0))
+                kb = parse_reply_markup(payload.get("reply_markup"))
+                msg = await tg_client.edit_message_reply_markup(chat_id, message_id, reply_markup=kb)
+                return {"ok": True, "result": {"message_id": msg.id if msg else message_id}}
+
+            elif method == "deleteMessage":
+                raw_chat_id = payload.get("chat_id")
+                chat_id = int(raw_chat_id) if str(raw_chat_id).lstrip("-").isdigit() else raw_chat_id
+                message_id = int(payload.get("message_id", 0))
+                await tg_client.delete_messages(chat_id, message_id)
+                return {"ok": True, "result": True}
+
+            elif method == "sendPhoto":
+                raw_chat_id = payload.get("chat_id")
+                chat_id = int(raw_chat_id) if str(raw_chat_id).lstrip("-").isdigit() else raw_chat_id
+                photo = payload.get("photo")
+                caption = payload.get("caption", "")
+                if len(caption) > 1024:
+                    caption = caption[:1020] + "..."
+                kb = parse_reply_markup(payload.get("reply_markup"))
+                kwargs = {}
+                if kb is not None:
+                    kwargs["reply_markup"] = kb
+                msg = await tg_client.send_photo(chat_id, photo=photo, caption=caption, parse_mode=ParseMode.HTML, **kwargs)
+                return {"ok": True, "result": {"message_id": msg.id}}
+
+            elif method == "answerCallbackQuery":
+                cq_id = payload.get("callback_query_id")
+                text = payload.get("text", "")
+                show_alert = payload.get("show_alert", False)
+                try:
+                    await tg_client.answer_callback_query(cq_id, text=text, show_alert=show_alert)
+                except Exception:
+                    pass
+                return {"ok": True, "result": True}
+
+            elif method == "getMe":
+                me = await tg_client.get_me()
+                return {"ok": True, "result": {"id": me.id, "first_name": me.first_name, "username": me.username}}
+
+            elif method == "deleteWebhook":
+                return {"ok": True, "result": True}
+
+        except Exception as e:
+            logger.warning(f"[Pyrogram MTProto] call_tg error in {method}: {e}")
+
+    # Fallback to HTTP API if MTProto client is not yet ready
+    urls_to_try = [f"{TELEGRAM_API_DIRECT_URL}/{method}"]
     if TELEGRAM_API_URL != TELEGRAM_API_DIRECT_URL:
         urls_to_try.append(f"{TELEGRAM_API_URL}/{method}")
 
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
     }
-
-    # Pass 1: Async aiohttp with forced IPv4 (bypasses Docker IPv6 blackhole on AWS)
     for url in urls_to_try:
         try:
             connector = aiohttp.TCPConnector(family=socket.AF_INET, ssl=False)
             async with aiohttp.ClientSession(connector=connector, headers=headers, trust_env=False) as session:
                 async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=8.0)) as resp:
                     if resp.status == 200:
-                        data = await resp.json()
-                        if not data.get("ok"):
-                            logger.warning(f"[TelegramAPI] Error in {method}: {data.get('description')}")
-                        return data
-                    else:
-                        resp_txt = await resp.text()
-                        logger.warning(f"[TelegramAPI] HTTP {resp.status} on {url} for {method}: {resp_txt[:200]}")
-        except Exception as e:
-            logger.error(f"[TelegramAPI] aiohttp failed on {url} for {method}: {type(e).__name__}: {e}")
+                        return await resp.json()
+        except Exception:
             continue
 
-    # Pass 2: Sync requests in worker thread (native OS socket fallback)
-    for url in urls_to_try:
-        try:
-            def _sync_req():
-                return requests.post(url, json=payload, headers=headers, timeout=8.0)
-            resp = await asyncio.to_thread(_sync_req)
-            if resp.status_code == 200:
-                data = resp.json()
-                if not data.get("ok"):
-                    logger.warning(f"[TelegramAPI] Error in {method}: {data.get('description')}")
-                return data
-            else:
-                logger.warning(f"[TelegramAPI] requests HTTP {resp.status_code} on {url} for {method}: {resp.text[:200]}")
-        except Exception as e:
-            logger.error(f"[TelegramAPI] requests fallback failed on {url} for {method}: {type(e).__name__}: {e}")
-            continue
-
-    logger.error(f"[TelegramAPI] All connection attempts failed for {method}")
     return None
 
 
@@ -104,7 +219,7 @@ async def send_msg(chat_id: int, text: str, reply_markup: Optional[dict] = None,
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
     }
-    if reply_markup:
+    if reply_markup is not None:
         payload["reply_markup"] = reply_markup
 
     res = await call_tg("sendMessage", payload)
@@ -125,7 +240,7 @@ async def edit_msg(chat_id: int, message_id: int, text: str, reply_markup: Optio
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
     }
-    if reply_markup:
+    if reply_markup is not None:
         payload["reply_markup"] = reply_markup
 
     res = await call_tg("editMessageText", payload)
@@ -145,14 +260,11 @@ async def send_photo_msg(
     video_id: Optional[str] = None
 ) -> Optional[int]:
     """
-    Guaranteed 16:9 Photo Delivery:
-    1. If local thumbnail file exists on disk in CACHE_DIR, upload directly via multipart/form-data.
-    2. Try YouTube official Google CDN 16:9 MaxRes (https://i.ytimg.com/vi/{id}/maxresdefault.jpg).
-    3. Try YouTube SD/HQ CDN (sddefault.jpg / hqdefault.jpg).
-    4. Try photo_url if it's a valid external HTTPS URL.
-    5. Fallback to text message only as last resort.
+    Guaranteed 16:9 Photo Delivery via Pyrogram MTProto:
+    1. If local thumbnail file exists on disk in CACHE_DIR, send directly via MTProto.
+    2. Try YouTube official Google CDN 16:9 MaxRes / SD / HQ.
+    3. Fallback to text message.
     """
-    # Auto-extract video_id if not provided
     if not video_id:
         if "vi/" in photo_url:
             try:
@@ -165,29 +277,28 @@ async def send_photo_msg(
             except Exception:
                 pass
 
-    # Tier 1: Check local cache on disk (100% reliable multipart upload)
+    global tg_client
+    kb = parse_reply_markup(reply_markup)
+
+    # Tier 1: Check local cache on disk (Instant MTProto photo transfer)
     if video_id:
         local_thumb = CACHE_DIR / f"thumb_{video_id}.jpg"
         if local_thumb.is_file() and local_thumb.stat().st_size > 500:
-            try:
-                url = f"{TELEGRAM_API_URL}/sendPhoto"
-                form = aiohttp.FormData()
-                form.add_field("chat_id", str(chat_id))
-                form.add_field("caption", caption)
-                form.add_field("parse_mode", "HTML")
-                if reply_markup:
-                    form.add_field("reply_markup", json.dumps(reply_markup))
-                with open(local_thumb, "rb") as f:
-                    form.add_field("photo", f, filename=f"thumb_{video_id}.jpg", content_type="image/jpeg")
-                    async with aiohttp.ClientSession() as session:
-                        async with session.post(url, data=form, timeout=aiohttp.ClientTimeout(total=20.0)) as resp:
-                            res = await resp.json()
-                            if res and res.get("ok"):
-                                msg_id = res["result"]["message_id"]
-                                controller_db.track_bot_message(chat_id, msg_id)
-                                return msg_id
-            except Exception as e:
-                logger.debug(f"Local thumbnail multipart upload failed for {video_id}: {e}")
+            if tg_client and tg_client.is_connected:
+                try:
+                    kwargs = {"reply_markup": kb} if kb else {}
+                    msg = await tg_client.send_photo(
+                        chat_id=chat_id,
+                        photo=str(local_thumb),
+                        caption=caption,
+                        parse_mode=ParseMode.HTML,
+                        **kwargs
+                    )
+                    if msg:
+                        controller_db.track_bot_message(chat_id, msg.id)
+                        return msg.id
+                except Exception as e:
+                    logger.debug(f"Local thumbnail MTProto send failed for {video_id}: {e}")
 
     # Tier 2: Google CDN 16:9 MaxRes, SD, HQ URLs
     cdn_urls = []
@@ -202,19 +313,32 @@ async def send_photo_msg(
 
     for cdn_u in cdn_urls:
         try:
-            payload = {
-                "chat_id": chat_id,
-                "photo": cdn_u,
-                "caption": caption,
-                "parse_mode": "HTML",
-            }
-            if reply_markup:
-                payload["reply_markup"] = reply_markup
-            res = await call_tg("sendPhoto", payload)
-            if res and res.get("ok"):
-                msg_id = res["result"]["message_id"]
-                controller_db.track_bot_message(chat_id, msg_id)
-                return msg_id
+            if tg_client and tg_client.is_connected:
+                kwargs = {"reply_markup": kb} if kb else {}
+                msg = await tg_client.send_photo(
+                    chat_id=chat_id,
+                    photo=cdn_u,
+                    caption=caption,
+                    parse_mode=ParseMode.HTML,
+                    **kwargs
+                )
+                if msg:
+                    controller_db.track_bot_message(chat_id, msg.id)
+                    return msg.id
+            else:
+                payload = {
+                    "chat_id": chat_id,
+                    "photo": cdn_u,
+                    "caption": caption,
+                    "parse_mode": "HTML",
+                }
+                if reply_markup is not None:
+                    payload["reply_markup"] = reply_markup
+                res = await call_tg("sendPhoto", payload)
+                if res and res.get("ok"):
+                    msg_id = res["result"]["message_id"]
+                    controller_db.track_bot_message(chat_id, msg_id)
+                    return msg_id
         except Exception as e:
             logger.debug(f"CDN sendPhoto failed for {cdn_u}: {e}")
 
@@ -224,65 +348,51 @@ async def send_photo_msg(
 
 
 async def send_audio_file(chat_id: int, file_path: str, title: str, performer: str, duration: int, caption: str) -> bool:
-    """Uploads local MP3 file directly into Telegram chat via multipart/form-data"""
+    """Uploads local audio file directly into Telegram chat via Pyrogram MTProto"""
     if not os.path.exists(file_path):
         return False
-    url = f"{TELEGRAM_API_URL}/sendAudio"
-    data = aiohttp.FormData()
-    data.add_field("chat_id", str(chat_id))
-    data.add_field("title", title)
-    data.add_field("performer", performer)
-    data.add_field("duration", str(duration))
-    data.add_field("caption", caption)
-    data.add_field("parse_mode", "HTML")
-    fname = os.path.basename(file_path)
-    if fname.endswith(".opus"):
-        content_type = "audio/ogg"
-    elif fname.endswith(".m4a"):
-        content_type = "audio/mp4"
-    elif fname.endswith(".flac"):
-        content_type = "audio/flac"
-    elif fname.endswith(".wav"):
-        content_type = "audio/wav"
-    else:
-        content_type = "audio/mpeg"
-
-    with open(file_path, "rb") as f:
-        data.add_field("audio", f, filename=fname, content_type=content_type)
-        async with aiohttp.ClientSession() as session:
-            try:
-                async with session.post(url, data=data, timeout=aiohttp.ClientTimeout(total=180.0)) as resp:
-                    res = await resp.json()
-                    return bool(res and res.get("ok"))
-            except Exception as e:
-                logger.error(f"Failed to upload audio to Telegram: {e}")
-                return False
+    global tg_client
+    if tg_client and tg_client.is_connected:
+        try:
+            await tg_client.send_audio(
+                chat_id=chat_id,
+                audio=file_path,
+                title=title,
+                performer=performer,
+                duration=int(duration) if duration else None,
+                caption=caption,
+                parse_mode=ParseMode.HTML
+            )
+            return True
+        except Exception as e:
+            logger.error(f"[send_audio_file MTProto] Error: {e}")
+            return False
+    return False
 
 
 async def send_video_file(chat_id: int, file_path: str, caption: str) -> bool:
-    """Uploads local MP4 file directly into Telegram chat (if under 50MB)"""
+    """Uploads local MP4 file directly into Telegram chat via Pyrogram MTProto (if under 50MB)"""
     if not os.path.exists(file_path):
         return False
     size_mb = os.path.getsize(file_path) / (1024 * 1024)
     if size_mb > 49.0:
         logger.info(f"Video {file_path} ({size_mb:.1f}MB) exceeds Telegram 50MB limit.")
         return False
-    url = f"{TELEGRAM_API_URL}/sendVideo"
-    data = aiohttp.FormData()
-    data.add_field("chat_id", str(chat_id))
-    data.add_field("caption", caption)
-    data.add_field("parse_mode", "HTML")
-    data.add_field("supports_streaming", "true")
-    with open(file_path, "rb") as f:
-        data.add_field("video", f, filename=os.path.basename(file_path), content_type="video/mp4")
-        async with aiohttp.ClientSession() as session:
-            try:
-                async with session.post(url, data=data, timeout=aiohttp.ClientTimeout(total=240.0)) as resp:
-                    res = await resp.json()
-                    return bool(res and res.get("ok"))
-            except Exception as e:
-                logger.error(f"Failed to upload video to Telegram: {e}")
-                return False
+    global tg_client
+    if tg_client and tg_client.is_connected:
+        try:
+            await tg_client.send_video(
+                chat_id=chat_id,
+                video=file_path,
+                caption=caption,
+                parse_mode=ParseMode.HTML,
+                supports_streaming=True
+            )
+            return True
+        except Exception as e:
+            logger.error(f"[send_video_file MTProto] Error: {e}")
+            return False
+    return False
 
 
 async def download_and_upload_audio(chat_id: int, video_id: str, title: str = "", audio_format: str = "opus"):
@@ -1651,85 +1761,124 @@ async def auto_pruner_task():
 
 
 async def telegram_polling_loop():
-    """Long-polling daemon for Telegram updates"""
-    offset = 0
+    """Pyrogram MTProto bot engine for GameOver YouTube API Controller (@YOUTUBE_API_LOGS_BOT)"""
+    global tg_client
     logger.info("==================================================")
-    logger.info("Starting Telegram Bot Controller (@YOUTUBE_API_LOGS_BOT)")
+    logger.info("Starting Telegram Bot Controller (@YOUTUBE_API_LOGS_BOT) via Pyrogram MTProto")
     logger.info(f"Owner: {OWNER_ID} ({OWNER_HANDLE})")
     logger.info("==================================================")
-
-    # Auto-delete any webhook so getUpdates long polling never conflicts (409 Conflict)
-    try:
-        await call_tg("deleteWebhook", {"drop_pending_updates": False})
-    except Exception as e:
-        logger.warning(f"Could not delete webhook: {e}")
 
     # Start 24h message auto-pruner
     asyncio.create_task(auto_pruner_task())
 
-    # Send initial boot ping to Owner
-    try:
-        await send_msg(
-            OWNER_ID,
-            f"⚡ <b>GᴀᴍᴇOᴠᴇʀ API Cᴏɴᴛʀᴏʟʟᴇʀ Bᴏᴛ Oɴʟɪɴᴇ</b>\n\n"
-            f"• <b>Sᴇʀᴠᴇʀ:</b> <code>{BASE_URL}</code>\n"
-            f"• <b>Pᴏʀᴛ:</b> <code>{PORT}</code>\n"
-            f"• <b>Sᴛᴀᴛᴜs:</b> 🟢 Aᴄᴛɪᴠᴇ\n\n"
-            f"Cʟɪᴄᴋ ᴏɴ ᴀɴʏ ʙᴜᴛᴛᴏɴ ʙᴇʟᴏᴡ ᴛᴏ ᴄᴏɴᴛʀᴏʟ:",
-            reply_markup=get_main_keyboard(),
-            track=False
-        )
-    except Exception as e:
-        logger.warning(f"Could not send startup message: {e}")
+    tg_client = Client(
+        "GameOverAPIBot",
+        api_id=API_ID,
+        api_hash=API_HASH,
+        bot_token=BOT_TOKEN,
+        ipv6=False,
+        in_memory=True
+    )
 
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
-    }
+    @tg_client.on_message()
+    async def _on_pyrogram_message(client, message):
+        try:
+            first_name = message.from_user.first_name if message.from_user else "User"
+            chat_title = message.chat.title if message.chat.title else "Private Chat"
+
+            reply_dict = None
+            if message.reply_to_message:
+                rep = message.reply_to_message
+                r_from = rep.from_user
+                reply_dict = {
+                    "message_id": rep.id,
+                    "from": {
+                        "id": r_from.id if r_from else 0,
+                        "first_name": r_from.first_name if r_from else "User",
+                        "username": r_from.username if r_from else ""
+                    } if r_from else None,
+                    "text": rep.text or rep.caption or ""
+                }
+
+            msg_payload = {
+                "message_id": message.id,
+                "from": {
+                    "id": message.from_user.id if message.from_user else 0,
+                    "first_name": first_name,
+                    "username": message.from_user.username if message.from_user else ""
+                },
+                "chat": {
+                    "id": message.chat.id,
+                    "type": str(message.chat.type).split(".")[-1].lower(),
+                    "title": chat_title
+                },
+                "text": message.text or message.caption or "",
+                "reply_to_message": reply_dict
+            }
+            asyncio.create_task(handle_message(msg_payload))
+        except Exception as e:
+            logger.error(f"[on_message Error] {e}")
+
+    @tg_client.on_callback_query()
+    async def _on_pyrogram_callback(client, query):
+        try:
+            first_name = query.from_user.first_name if query.from_user else "User"
+            update_dict = {
+                "id": str(query.id),
+                "from": {
+                    "id": query.from_user.id if query.from_user else 0,
+                    "first_name": first_name,
+                    "username": query.from_user.username if query.from_user else ""
+                },
+                "message": {
+                    "message_id": query.message.id if query.message else 0,
+                    "chat": {
+                        "id": query.message.chat.id if query.message else 0
+                    },
+                    "text": query.message.text or query.message.caption or "" if query.message else ""
+                },
+                "data": query.data or ""
+            }
+            asyncio.create_task(handle_callback_query(update_dict))
+        except Exception as e:
+            logger.error(f"[on_callback_query Error] {e}")
 
     while True:
         try:
-            connector = aiohttp.TCPConnector(family=socket.AF_INET, ssl=False)
-            async with aiohttp.ClientSession(connector=connector, headers=headers, trust_env=False) as session:
-                url = f"{TELEGRAM_API_DIRECT_URL}/getUpdates"
-                payload = {
-                    "offset": offset,
-                    "timeout": 15,
-                    "allowed_updates": ["message", "edited_message", "callback_query", "inline_query"]
-                }
-                async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=20.0)) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        for update in data.get("result", []):
-                            offset = update["update_id"] + 1
-                            if "message" in update:
-                                asyncio.create_task(handle_message(update["message"]))
-                            elif "callback_query" in update:
-                                asyncio.create_task(handle_callback_query(update["callback_query"]))
-                    else:
-                        resp_txt = await resp.text()
-                        logger.warning(f"[TelegramPolling] getUpdates HTTP {resp.status} on {url}: {resp_txt[:150]}")
-                        await asyncio.sleep(2.0)
+            logger.info("[TelegramBot] Connecting to Telegram MTProto...")
+            await tg_client.start()
+            me = await tg_client.get_me()
+            logger.info("==================================================")
+            logger.info(f"Pyrogram MTProto Connected! Bot: @{me.username} ({me.id})")
+            logger.info("==================================================")
+
+            # Send initial boot ping to Owner
+            try:
+                await send_msg(
+                    OWNER_ID,
+                    f"⚡ <b>GᴀᴍᴇOᴠᴇʀ API Cᴏɴᴛʀᴏʟʟᴇʀ Bᴏᴛ Oɴʟɪɴᴇ</b>\n\n"
+                    f"• <b>Sᴇʀᴠᴇʀ:</b> <code>{BASE_URL}</code>\n"
+                    f"• <b>Pᴏʀᴛ:</b> <code>{PORT}</code>\n"
+                    f"• <b>Pʀᴏᴛᴏᴄᴏʟ:</b> 🚀 MTProto TCP (100% Reliable)\n"
+                    f"• <b>Sᴛᴀᴛᴜs:</b> 🟢 Aᴄᴛɪᴠᴇ\n\n"
+                    f"Cʟɪᴄᴋ ᴏɴ ᴀɴʏ ʙᴜᴛᴛᴏɴ ʙᴇʟᴏᴡ ᴛᴏ ᴄᴏɴᴛʀᴏʟ:",
+                    reply_markup=get_main_keyboard(),
+                    track=False
+                )
+            except Exception as e:
+                logger.warning(f"Could not send startup message: {e}")
+
+            # Keep task alive while client is connected
+            while tg_client.is_connected:
+                await asyncio.sleep(5.0)
+
         except asyncio.CancelledError:
             break
         except Exception as e:
-            logger.debug(f"[TelegramPolling] aiohttp poll note: {e}. Retrying via requests...")
+            logger.error(f"[TelegramBot] MTProto connection error: {e}. Reconnecting in 10s...")
             try:
-                def _sync_poll():
-                    return requests.post(
-                        f"{TELEGRAM_API_DIRECT_URL}/getUpdates",
-                        json={"offset": offset, "timeout": 5, "allowed_updates": ["message", "edited_message", "callback_query"]},
-                        headers=headers,
-                        timeout=10.0
-                    )
-                s_resp = await asyncio.to_thread(_sync_poll)
-                if s_resp.status_code == 200:
-                    data = s_resp.json()
-                    for update in data.get("result", []):
-                        offset = update["update_id"] + 1
-                        if "message" in update:
-                            asyncio.create_task(handle_message(update["message"]))
-                        elif "callback_query" in update:
-                            asyncio.create_task(handle_callback_query(update["callback_query"]))
-            except Exception as se:
-                logger.debug(f"[TelegramPolling] Sync poll note: {se}")
-            await asyncio.sleep(2.0)
+                if tg_client.is_connected:
+                    await tg_client.stop()
+            except Exception:
+                pass
+            await asyncio.sleep(10.0)
