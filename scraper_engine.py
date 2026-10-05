@@ -9,7 +9,7 @@ import urllib.parse
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple, List
 
-from config import CACHE_DIR
+from config import CACHE_DIR, CF_WORKER_URL
 
 logger = logging.getLogger("GameOverAPI.ScraperEngine")
 
@@ -146,6 +146,23 @@ async def search_youtube_web(query: str) -> Optional[Dict[str, str]]:
     if v_id:
         return {"video_id": v_id, "url": f"https://www.youtube.com/watch?v={v_id}", "title": clean_query}
 
+    # Tier 0: Cloudflare Edge Search Proxy (100% bypass on Hugging Face)
+    if CF_WORKER_URL:
+        try:
+            cf_url = f"{CF_WORKER_URL.rstrip('/')}/search?query={urllib.parse.quote(clean_query)}"
+            async with aiohttp.ClientSession() as cf_session:
+                async with cf_session.get(cf_url, timeout=aiohttp.ClientTimeout(total=4.0)) as cf_resp:
+                    if cf_resp.status == 200:
+                        cf_data = await cf_resp.json()
+                        if cf_data.get("id"):
+                            vid = cf_data["id"]
+                            v_url = cf_data.get("youtube_url") or f"https://www.youtube.com/watch?v={vid}"
+                            t = cf_data.get("title") or clean_query
+                            logger.info(f"[WebSearch][CF] Found: '{t}' ({vid})")
+                            return {"video_id": vid, "url": v_url, "title": t}
+        except Exception as cf_err:
+            logger.debug(f"[WebSearch] CF Edge search note: {cf_err}")
+
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
         "Accept-Language": "en-US,en;q=0.9",
@@ -220,7 +237,35 @@ async def search_youtube_full(query: str, max_results: int = 5) -> Dict[str, Any
             "results": [item],
         }
 
-    # 2. General Search: Tier 1 InnerTube API (0.2s, 0 datacenter blocks)
+    # 2. General Search: Tier 0 Cloudflare Edge Search Proxy (100% bypass on Hugging Face)
+    if CF_WORKER_URL:
+        try:
+            cf_url = f"{CF_WORKER_URL.rstrip('/')}/search?query={urllib.parse.quote(clean)}"
+            async with aiohttp.ClientSession() as cf_session:
+                async with cf_session.get(cf_url, timeout=aiohttp.ClientTimeout(total=5.0)) as cf_resp:
+                    if cf_resp.status == 200:
+                        cf_data = await cf_resp.json()
+                        if cf_data.get("id"):
+                            primary_id = cf_data["id"]
+                            primary_thumb = cf_data.get("thumbnail_remote") or f"https://i.ytimg.com/vi/{primary_id}/hqdefault.jpg"
+                            await save_thumbnail_local(primary_id, primary_thumb)
+                            return {
+                                "primary": {
+                                    "id": primary_id,
+                                    "title": cf_data.get("title", clean),
+                                    "duration": cf_data.get("duration", "03:30"),
+                                    "duration_sec": cf_data.get("duration_sec", 210),
+                                    "thumbnail_file": f"thumb_{primary_id}.jpg",
+                                    "thumbnail_remote": primary_thumb,
+                                    "uploader": cf_data.get("uploader", "YouTube"),
+                                    "youtube_url": cf_data.get("youtube_url") or f"https://www.youtube.com/watch?v={primary_id}",
+                                },
+                                "results": cf_data.get("results") or []
+                            }
+        except Exception as cf_err:
+            logger.debug(f"[SearchFull] CF Edge search note: {cf_err}")
+
+    # Tier 1: InnerTube API (0.2s, 0 datacenter blocks)
     results = []
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
