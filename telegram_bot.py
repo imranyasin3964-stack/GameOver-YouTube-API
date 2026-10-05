@@ -72,7 +72,7 @@ async def call_tg(method: str, payload: dict) -> Optional[dict]:
                         resp_txt = await resp.text()
                         logger.warning(f"[TelegramAPI] HTTP {resp.status} on {url} for {method}: {resp_txt[:200]}")
         except Exception as e:
-            logger.debug(f"[TelegramAPI] aiohttp failed on {url} for {method}: {type(e).__name__}: {e}")
+            logger.error(f"[TelegramAPI] aiohttp failed on {url} for {method}: {type(e).__name__}: {e}")
             continue
 
     # Pass 2: Sync requests in worker thread (native OS socket fallback)
@@ -89,7 +89,7 @@ async def call_tg(method: str, payload: dict) -> Optional[dict]:
             else:
                 logger.warning(f"[TelegramAPI] requests HTTP {resp.status_code} on {url} for {method}: {resp.text[:200]}")
         except Exception as e:
-            logger.debug(f"[TelegramAPI] requests fallback failed on {url} for {method}: {type(e).__name__}: {e}")
+            logger.error(f"[TelegramAPI] requests fallback failed on {url} for {method}: {type(e).__name__}: {e}")
             continue
 
     logger.error(f"[TelegramAPI] All connection attempts failed for {method}")

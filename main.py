@@ -263,6 +263,14 @@ async def health_check():
     }
 
 
+@app.get("/test-tg")
+async def test_telegram_connectivity():
+    from telegram_bot import call_tg
+    res = await call_tg("getMe", {})
+    return {"status": "ok" if res and res.get("ok") else "error", "response": res}
+
+
+
 @app.get("/logs", response_class=HTMLResponse)
 async def view_logs():
     """Live interactive log viewer for browser"""
