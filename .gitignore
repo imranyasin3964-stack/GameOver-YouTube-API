@@ -25,3 +25,7 @@ tmp_*
 
 # Database
 *.sqlite3
+
+# Local desktop tools
+reboot_space.*
+

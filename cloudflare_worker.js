@@ -40,7 +40,12 @@ export default {
       return await handleEdgeSearch(request, url, workerOrigin, startTime);
     }
 
-    // 3. Reverse Proxy to Private Hugging Face Space (/download, /media, /health, /autoplay, /docs)
+    // 3. Telegram Bot API Proxy (Bypasses Hugging Face AWS Telegram IP blocks)
+    if (path.startsWith("/telegram/")) {
+      return await handleTelegramProxy(request, url);
+    }
+
+    // 4. Reverse Proxy to Private Hugging Face Space (/download, /media, /health, /autoplay, /docs)
     return await handleReverseProxy(request, env, url, workerOrigin);
   },
 };
@@ -303,3 +308,41 @@ function parseDurationToSec(durStr) {
   if (parts.length === 1 && !isNaN(parts[0])) return parts[0];
   return 0;
 }
+
+/**
+ * Telegram Bot API Reverse Proxy
+ * Bridges Hugging Face Spaces to api.telegram.org with zero latency and no IP blocks.
+ */
+async function handleTelegramProxy(request, url) {
+  const tgPath = url.pathname.replace(/^\/telegram\/?/, "");
+  const targetUrl = `https://api.telegram.org/${tgPath}${url.search}`;
+
+  const reqHeaders = new Headers(request.headers);
+  reqHeaders.set("Host", "api.telegram.org");
+
+  const fetchOptions = {
+    method: request.method,
+    headers: reqHeaders,
+  };
+
+  if (request.method !== "GET" && request.method !== "HEAD" && request.body) {
+    fetchOptions.body = request.body;
+  }
+
+  try {
+    const tgResp = await fetch(targetUrl, fetchOptions);
+    const respHeaders = new Headers(tgResp.headers);
+    respHeaders.set("Access-Control-Allow-Origin", "*");
+    return new Response(tgResp.body, {
+      status: tgResp.status,
+      statusText: tgResp.statusText,
+      headers: respHeaders,
+    });
+  } catch (err) {
+    return new Response(
+      JSON.stringify({ ok: false, error: `Telegram proxy error: ${err.message}` }),
+      { status: 502, headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } }
+    );
+  }
+}
+

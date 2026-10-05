@@ -10,12 +10,18 @@ from typing import Optional, Dict, Any, List
 
 import controller_db
 from cache_manager import get_cache_stats
-from config import BASE_URL, PORT, CACHE_DIR
+from config import BASE_URL, PORT, CACHE_DIR, CF_WORKER_URL
 
 logger = logging.getLogger("GameOverAPI.TelegramBot")
 
 BOT_TOKEN = "8718878406:AAGOPBTJw1XQv45i5RBf01fGbpHfHbAbM5k"
-TELEGRAM_API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
+TELEGRAM_API_DIRECT_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
+# Route via Cloudflare Worker proxy to bypass AWS EC2 outbound blocks on Hugging Face
+if CF_WORKER_URL:
+    TELEGRAM_API_URL = f"{CF_WORKER_URL.rstrip('/')}/telegram/bot{BOT_TOKEN}"
+else:
+    TELEGRAM_API_URL = TELEGRAM_API_DIRECT_URL
+
 OWNER_ID = 6805412676
 OWNER_HANDLE = "@XHamsterFounders"
 
@@ -24,32 +30,40 @@ USER_STATES: Dict[int, Dict[str, Any]] = {}
 
 
 def get_main_keyboard() -> dict:
-    """Mobile-friendly 9-Button Grid with Close button and non-sticky keyboard"""
+    """Mobile-friendly 10-Button Grid with Close button and non-sticky keyboard"""
     return {
         "keyboard": [
             [{"text": "⚡ API Eɴᴅᴘᴏɪɴᴛs"}, {"text": "🔍 Tᴇsᴛ Sᴇᴀʀᴄʜ"}],
             [{"text": "📊 Sᴛᴀᴛs"}, {"text": "🌐 IPs Lɪsᴛ"}],
             [{"text": "🚫 Bʟᴏᴄᴋ Mᴀɴᴀɢᴇʀ"}, {"text": "⏱️ Lɪᴍɪᴛ Mᴀɴᴀɢᴇʀ"}],
-            [{"text": "👥 Aᴅᴍɪɴs"}, {"text": "🧹 Cʟᴇᴀʀ Oʟᴅ Lᴏɢs"}],
-            [{"text": "❌ Cʟᴏsᴇ Mᴇɴᴜ"}],
+            [{"text": "👥 Aᴅᴍɪɴs"}, {"text": "🔄 Rᴇʙᴏᴏᴛ Sᴘᴀᴄᴇ"}],
+            [{"text": "🧹 Cʟᴇᴀʀ Oʟᴅ Lᴏɢs"}, {"text": "❌ Cʟᴏsᴇ Mᴇɴᴜ"}],
         ],
         "resize_keyboard": True,
     }
 
 
 async def call_tg(method: str, payload: dict) -> Optional[dict]:
-    """Helper to make Telegram Bot API requests via aiohttp"""
-    url = f"{TELEGRAM_API_URL}/{method}"
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=15.0)) as resp:
-                data = await resp.json()
-                if not data.get("ok"):
-                    logger.warning(f"[TelegramAPI] Error in {method}: {data.get('description')}")
-                return data
-    except Exception as e:
-        logger.error(f"[TelegramAPI] Request failed for {method}: {e}")
-        return None
+    """Helper to make Telegram Bot API requests via aiohttp with automatic proxy fallback"""
+    urls_to_try = [f"{TELEGRAM_API_URL}/{method}"]
+    if TELEGRAM_API_URL != f"{TELEGRAM_API_DIRECT_URL}/{method}":
+        urls_to_try.append(f"{TELEGRAM_API_DIRECT_URL}/{method}")
+
+    for url in urls_to_try:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=8.0)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if not data.get("ok"):
+                            logger.warning(f"[TelegramAPI] Error in {method}: {data.get('description')}")
+                        return data
+        except Exception as e:
+            logger.debug(f"[TelegramAPI] Request attempt failed on {url} for {method}: {e}")
+            continue
+
+    logger.error(f"[TelegramAPI] All connection attempts failed for {method}")
+    return None
 
 
 async def send_msg(chat_id: int, text: str, reply_markup: Optional[dict] = None, track: bool = True) -> Optional[int]:
@@ -1510,6 +1524,20 @@ async def handle_message(msg: dict):
         else:
             await send_msg(chat_id, "Usage: <code>/addadmin &lt;user_id&gt; [viewer|editor]</code>")
 
+    # Command: /reboot or 🔄 Rᴇʙᴏᴏᴛ Sᴘᴀᴄᴇ
+    elif text in ("/reboot", "🔄 Rᴇʙᴏᴏᴛ Sᴘᴀᴄᴇ"):
+        if user_id != OWNER_ID:
+            await send_msg(chat_id, "⚠️ Oɴʟʏ ᴛʜᴇ Oᴡɴᴇʀ ᴄᴀɴ ʀᴇʙᴏᴏᴛ ᴛʜᴇ Hugging Face Space.")
+            return
+        await send_msg(
+            chat_id,
+            "🔄 <b>Rᴇʙᴏᴏᴛɪɴɢ Hugging Face Sᴘᴀᴄᴇ...</b>\n\n"
+            "• Sᴇʀᴠᴇʀ ɪs ɢʀᴀᴄᴇғᴜʟʟʏ ʀᴇsᴛᴀʀᴛɪɴɢ.\n"
+            "• 500GB+ NVMe/Bucket ᴄᴀᴄʜᴇ ᴀɴᴅ SQLite DB ᴀʀᴇ 100% ᴘᴇʀsɪsᴛᴇɴᴛ.\n"
+            "• Sᴘᴀᴄᴇ ᴡɪʟʟ ʙᴇ ʙᴀᴄᴋ ᴏɴʟɪɴᴇ ɪɴ ~15-20 sᴇᴄᴏɴᴅs."
+        )
+        asyncio.create_task(trigger_hf_restart())
+
     # Explicit Slash Test Commands
     elif text.startswith("/audio"):
         q = text.split(" ", 1)[1].strip() if " " in text else ""
@@ -1556,6 +1584,23 @@ async def handle_message(msg: dict):
         user_state = USER_STATES.pop(user_id, None)
         mode = user_state.get("mode") if user_state else None
         asyncio.create_task(execute_api_test(chat_id, text, forced_mode=mode))
+
+async def trigger_hf_restart() -> bool:
+    """Restarts Hugging Face Space via Hugging Face REST API."""
+    try:
+        hf_token = os.getenv("HF_TOKEN", "")
+        repo_id = os.getenv("SPACE_ID", "Imranyasin/gameover-music-bot")
+        if not hf_token:
+            logger.warning("[HFRestart] HF_TOKEN secret not configured in Space environment.")
+            return False
+        url = f"https://huggingface.co/api/spaces/{repo_id}/restart"
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers={"Authorization": f"Bearer {hf_token}"}, timeout=aiohttp.ClientTimeout(total=10.0)) as r:
+                logger.info(f"[HFRestart] Space restart trigger response: {r.status}")
+                return r.status in (200, 201)
+    except Exception as e:
+        logger.error(f"[HFRestart] Failed to restart Hugging Face Space: {e}")
+        return False
 
 
 async def auto_pruner_task():

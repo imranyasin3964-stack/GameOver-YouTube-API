@@ -366,9 +366,25 @@ async def fetch_oembed_info(video_id: str) -> Optional[Dict[str, Any]]:
 
 async def fetch_duration_web(video_id: str) -> Tuple[int, str]:
     """
-    Scrapes video duration directly from the YouTube watch page without triggering bot blocks.
+    Scrapes video duration with Cloudflare edge fast lookup and short timeout fallback.
     Returns: (duration_sec: int, duration_formatted: str)
     """
+    # Fast Tier 0: Lookup via Cloudflare edge (0.15s)
+    if CF_WORKER_URL:
+        try:
+            cf_url = f"{CF_WORKER_URL.rstrip('/')}/search?query={video_id}"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(cf_url, timeout=aiohttp.ClientTimeout(total=2.0)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        sec = data.get("duration_sec")
+                        dur = data.get("duration")
+                        if sec and dur and dur != "00:00":
+                            return int(sec), str(dur)
+        except Exception:
+            pass
+
+    # Tier 1 Fallback: Direct watch page HTML with tight 1.5s timeout
     url = f"https://www.youtube.com/watch?v={video_id}"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
@@ -376,7 +392,7 @@ async def fetch_duration_web(video_id: str) -> Tuple[int, str]:
     }
     try:
         async with aiohttp.ClientSession(headers=headers) as session:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=5.0)) as resp:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=1.5)) as resp:
                 if resp.status == 200:
                     html = await resp.text(errors="ignore")
                     m = re.search(r'"lengthSeconds"\s*:\s*"(\d+)"', html) or re.search(r'"approxDurationMs"\s*:\s*"(\d+)"', html)

@@ -118,6 +118,8 @@ async def on_startup():
     asyncio.create_task(telegram_polling_loop())
     # Start 24/7 keep-alive self-ping worker for Hugging Face Spaces
     asyncio.create_task(keep_alive_worker())
+    # Start 24h Space Auto-Reboot worker
+    asyncio.create_task(space_auto_reboot_worker())
 
 
 async def keep_alive_worker():
@@ -132,6 +134,29 @@ async def keep_alive_worker():
                     pass
         except Exception:
             pass
+
+
+async def space_auto_reboot_worker():
+    """Gracefully reboots Hugging Face Space every 24 hours to clear memory leaks."""
+    reboot_hours = float(os.getenv("AUTO_REBOOT_HOURS", "24.0"))
+    if reboot_hours <= 0:
+        return
+    logger.info(f"[AutoReboot] Space auto-reboot worker active (every {reboot_hours}h).")
+    while True:
+        try:
+            await asyncio.sleep(reboot_hours * 3600)
+            logger.info("[AutoReboot] 24h reached. Triggering Space restart via HF API...")
+            hf_token = os.getenv("HF_TOKEN", "")
+            repo_id = os.getenv("SPACE_ID", "Imranyasin/gameover-music-bot")
+            if not hf_token:
+                logger.warning("[AutoReboot] HF_TOKEN secret not configured in Space environment.")
+                continue
+            url = f"https://huggingface.co/api/spaces/{repo_id}/restart"
+            async with aiohttp.ClientSession() as s:
+                async with s.post(url, headers={"Authorization": f"Bearer {hf_token}"}, timeout=aiohttp.ClientTimeout(total=10.0)) as r:
+                    logger.info(f"[AutoReboot] Restart trigger response: {r.status}")
+        except Exception as e:
+            logger.error(f"[AutoReboot] Auto-reboot error: {e}")
 
 
 @app.get("/favicon.ico", include_in_schema=False)
