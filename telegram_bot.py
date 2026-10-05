@@ -6,6 +6,8 @@ import logging
 import time
 import urllib.parse
 import re
+import socket
+import requests
 from typing import Optional, Dict, Any, List
 
 import controller_db
@@ -16,7 +18,7 @@ logger = logging.getLogger("GameOverAPI.TelegramBot")
 
 BOT_TOKEN = "8718878406:AAGOPBTJw1XQv45i5RBf01fGbpHfHbAbM5k"
 TELEGRAM_API_DIRECT_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
-# Route via Cloudflare Worker proxy to bypass AWS EC2 outbound blocks on Hugging Face
+# Support both direct connection (IPv4 forced) and Cloudflare proxy fallback
 if CF_WORKER_URL:
     TELEGRAM_API_URL = f"{CF_WORKER_URL.rstrip('/')}/telegram/bot{BOT_TOKEN}"
 else:
@@ -44,20 +46,23 @@ def get_main_keyboard() -> dict:
 
 
 async def call_tg(method: str, payload: dict) -> Optional[dict]:
-    """Helper to make Telegram Bot API requests via aiohttp with automatic proxy fallback"""
-    urls_to_try = [f"{TELEGRAM_API_URL}/{method}"]
-    if TELEGRAM_API_URL != f"{TELEGRAM_API_DIRECT_URL}/{method}":
-        urls_to_try.append(f"{TELEGRAM_API_DIRECT_URL}/{method}")
+    """Helper to make Telegram Bot API requests via IPv4-forced aiohttp with requests fallback"""
+    urls_to_try = [
+        f"{TELEGRAM_API_DIRECT_URL}/{method}",
+    ]
+    if TELEGRAM_API_URL != TELEGRAM_API_DIRECT_URL:
+        urls_to_try.append(f"{TELEGRAM_API_URL}/{method}")
 
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
     }
 
+    # Pass 1: Async aiohttp with forced IPv4 (bypasses Docker IPv6 blackhole on AWS)
     for url in urls_to_try:
         try:
-            connector = aiohttp.TCPConnector(ssl=False)
+            connector = aiohttp.TCPConnector(family=socket.AF_INET, ssl=False)
             async with aiohttp.ClientSession(connector=connector, headers=headers, trust_env=False) as session:
-                async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=10.0)) as resp:
+                async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=8.0)) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         if not data.get("ok"):
@@ -67,7 +72,24 @@ async def call_tg(method: str, payload: dict) -> Optional[dict]:
                         resp_txt = await resp.text()
                         logger.warning(f"[TelegramAPI] HTTP {resp.status} on {url} for {method}: {resp_txt[:200]}")
         except Exception as e:
-            logger.warning(f"[TelegramAPI] Request attempt failed on {url} for {method}: {type(e).__name__}: {e}")
+            logger.debug(f"[TelegramAPI] aiohttp failed on {url} for {method}: {type(e).__name__}: {e}")
+            continue
+
+    # Pass 2: Sync requests in worker thread (native OS socket fallback)
+    for url in urls_to_try:
+        try:
+            def _sync_req():
+                return requests.post(url, json=payload, headers=headers, timeout=8.0)
+            resp = await asyncio.to_thread(_sync_req)
+            if resp.status_code == 200:
+                data = resp.json()
+                if not data.get("ok"):
+                    logger.warning(f"[TelegramAPI] Error in {method}: {data.get('description')}")
+                return data
+            else:
+                logger.warning(f"[TelegramAPI] requests HTTP {resp.status_code} on {url} for {method}: {resp.text[:200]}")
+        except Exception as e:
+            logger.debug(f"[TelegramAPI] requests fallback failed on {url} for {method}: {type(e).__name__}: {e}")
             continue
 
     logger.error(f"[TelegramAPI] All connection attempts failed for {method}")
@@ -1666,9 +1688,9 @@ async def telegram_polling_loop():
 
     while True:
         try:
-            connector = aiohttp.TCPConnector(ssl=False)
+            connector = aiohttp.TCPConnector(family=socket.AF_INET, ssl=False)
             async with aiohttp.ClientSession(connector=connector, headers=headers, trust_env=False) as session:
-                url = f"{TELEGRAM_API_URL}/getUpdates"
+                url = f"{TELEGRAM_API_DIRECT_URL}/getUpdates"
                 payload = {
                     "offset": offset,
                     "timeout": 15,
@@ -1690,5 +1712,24 @@ async def telegram_polling_loop():
         except asyncio.CancelledError:
             break
         except Exception as e:
-            logger.warning(f"[TelegramPolling] Connection note: {type(e).__name__}: {e}")
+            logger.debug(f"[TelegramPolling] aiohttp poll note: {e}. Retrying via requests...")
+            try:
+                def _sync_poll():
+                    return requests.post(
+                        f"{TELEGRAM_API_DIRECT_URL}/getUpdates",
+                        json={"offset": offset, "timeout": 5, "allowed_updates": ["message", "edited_message", "callback_query"]},
+                        headers=headers,
+                        timeout=10.0
+                    )
+                s_resp = await asyncio.to_thread(_sync_poll)
+                if s_resp.status_code == 200:
+                    data = s_resp.json()
+                    for update in data.get("result", []):
+                        offset = update["update_id"] + 1
+                        if "message" in update:
+                            asyncio.create_task(handle_message(update["message"]))
+                        elif "callback_query" in update:
+                            asyncio.create_task(handle_callback_query(update["callback_query"]))
+            except Exception as se:
+                logger.debug(f"[TelegramPolling] Sync poll note: {se}")
             await asyncio.sleep(2.0)
