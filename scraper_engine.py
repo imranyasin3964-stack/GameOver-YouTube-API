@@ -95,6 +95,44 @@ async def save_thumbnail_local(video_id: str, remote_url: Optional[str] = None) 
     return thumb_name
 
 
+async def fetch_youtubei_search(session: aiohttp.ClientSession, query: str, max_items: int = 25) -> List[Dict[str, Any]]:
+    """Ultra-fast YouTube search via official InnerTube endpoint (0.2s - 0.4s). Zero datacenter blocks."""
+    url = "https://www.youtube.com/youtubei/v1/search"
+    payload = {
+        'context': {'client': {'clientName': 'WEB', 'clientVersion': '2.20240726.00.00', 'hl': 'en', 'gl': 'US'}},
+        'query': query
+    }
+    try:
+        async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=5.0)) as resp:
+            if resp.status != 200:
+                return []
+            data = await resp.json()
+            videos = []
+            def extract(obj):
+                if isinstance(obj, dict):
+                    if "videoRenderer" in obj:
+                        videos.append(obj["videoRenderer"])
+                    for v in obj.values():
+                        extract(v)
+                elif isinstance(obj, list):
+                    for itm in obj:
+                        extract(itm)
+            extract(data)
+            out = []
+            for v in videos[:max_items]:
+                vid = v.get("videoId")
+                if not vid or len(vid) != 11:
+                    continue
+                title = "".join(x.get("text", "") for x in v.get("title", {}).get("runs", []))
+                dur = v.get("lengthText", {}).get("simpleText", "03:30")
+                by = "".join(x.get("text", "") for x in v.get("ownerText", {}).get("runs", []))
+                out.append({"id": vid, "title": title, "duration": dur, "uploader": by})
+            return out
+    except Exception as e:
+        logger.debug(f"[YouTubeiSearch] error for '{query}': {e}")
+        return []
+
+
 async def search_youtube_web(query: str) -> Optional[Dict[str, str]]:
     """
     Ultra-fast 0.2s YouTube Web HTML search parser.
@@ -108,15 +146,23 @@ async def search_youtube_web(query: str) -> Optional[Dict[str, str]]:
     if v_id:
         return {"video_id": v_id, "url": f"https://www.youtube.com/watch?v={v_id}", "title": clean_query}
 
-    encoded = urllib.parse.quote(clean_query)
-    url = f"https://www.youtube.com/results?search_query={encoded}"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
         "Accept-Language": "en-US,en;q=0.9",
     }
     try:
         async with aiohttp.ClientSession(headers=headers) as session:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=6.0)) as resp:
+            # Tier 1: InnerTube official JSON (0.2s, 0 datacenter blocks)
+            inner_results = await fetch_youtubei_search(session, clean_query, max_items=1)
+            if inner_results:
+                r = inner_results[0]
+                logger.info(f"[WebSearch] Found: '{r['title']}' ({r['id']})")
+                return {"video_id": r["id"], "url": f"https://www.youtube.com/watch?v={r['id']}", "title": r["title"]}
+
+            # Tier 2: HTML scraping fallback
+            encoded = urllib.parse.quote(clean_query)
+            url = f"https://www.youtube.com/results?search_query={encoded}"
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=4.0)) as resp:
                 if resp.status == 200:
                     html = await resp.text(errors="ignore")
                     v_ids = re.findall(r"/watch\?v=([a-zA-Z0-9_-]{11})", html)
@@ -174,77 +220,66 @@ async def search_youtube_full(query: str, max_results: int = 5) -> Dict[str, Any
             "results": [item],
         }
 
-    # 2. General Text Search via YouTube Web HTML + ytInitialData
-    encoded = urllib.parse.quote(clean)
-    url = f"https://www.youtube.com/results?search_query={encoded}"
+    # 2. General Search: Tier 1 InnerTube API (0.2s, 0 datacenter blocks)
+    results = []
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
         "Accept-Language": "en-US,en;q=0.9",
     }
     async with aiohttp.ClientSession(headers=headers) as session:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=6.0)) as resp:
-            if resp.status != 200:
-                raise RuntimeError(f"YouTube search failed with status {resp.status}")
-            html = await resp.text(errors="ignore")
-
-    m = re.search(r'var ytInitialData = ({.*?});</script>', html) or re.search(r'ytInitialData\s*=\s*({.*?});', html)
-    raw_items = []
-    if m:
-        try:
-            data = json.loads(m.group(1))
-            def find_renderers(obj):
-                if isinstance(obj, dict):
-                    if "videoRenderer" in obj:
-                        yield obj["videoRenderer"]
-                    for v in obj.values():
-                        yield from find_renderers(v)
-                elif isinstance(obj, list):
-                    for item in obj:
-                        yield from find_renderers(item)
-
-            raw_items = list(find_renderers(data))[:max_results]
-        except Exception as e:
-            logger.debug(f"ytInitialData parse note: {e}")
-
-    results = []
-    if raw_items:
-        for v in raw_items:
-            vid = v.get("videoId")
-            if not vid or len(vid) != 11:
-                continue
-            title = "".join(r.get("text", "") for r in v.get("title", {}).get("runs", [])) or clean
-            dur_str = v.get("lengthText", {}).get("simpleText", "00:00")
-            dur_sec = parse_duration_to_sec(dur_str)
-            owner = "".join(r.get("text", "") for r in v.get("ownerText", {}).get("runs", [])) or "YouTube"
-            results.append({
-                "id": vid,
-                "title": title,
-                "duration": dur_str,
-                "duration_sec": dur_sec,
-                "thumbnail_file": f"thumb_{vid}.jpg",
-                "thumbnail_remote": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
-                "uploader": owner,
-                "youtube_url": f"https://www.youtube.com/watch?v={vid}",
-            })
-    else:
-        # Fallback regex search if ytInitialData is absent
-        v_ids = re.findall(r"/watch\?v=([a-zA-Z0-9_-]{11})", html)
-        seen = set()
-        for target_id in v_ids:
-            if target_id not in seen and len(target_id) == 11:
-                seen.add(target_id)
+        inner_items = await fetch_youtubei_search(session, clean, max_items=max_results)
+        if inner_items:
+            for item in inner_items:
+                vid = item["id"]
+                dur_str = item["duration"]
                 results.append({
-                    "id": target_id,
-                    "title": clean,
-                    "duration": "03:30",
-                    "duration_sec": 210,
-                    "thumbnail_file": f"thumb_{target_id}.jpg",
-                    "thumbnail_remote": f"https://i.ytimg.com/vi/{target_id}/hqdefault.jpg",
-                    "uploader": "YouTube",
-                    "youtube_url": f"https://www.youtube.com/watch?v={target_id}",
+                    "id": vid,
+                    "title": item["title"],
+                    "duration": dur_str,
+                    "duration_sec": parse_duration_to_sec(dur_str),
+                    "thumbnail_file": f"thumb_{vid}.jpg",
+                    "thumbnail_remote": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
+                    "uploader": item.get("uploader", "YouTube"),
+                    "youtube_url": f"https://www.youtube.com/watch?v={vid}",
                 })
-            if len(results) >= max_results:
-                break
+        else:
+            # Fallback to HTML scraping
+            encoded = urllib.parse.quote(clean)
+            url = f"https://www.youtube.com/results?search_query={encoded}"
+            try:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=4.0)) as resp:
+                    if resp.status == 200:
+                        html = await resp.text(errors="ignore")
+                        m = re.search(r'var ytInitialData = ({.*?});</script>', html) or re.search(r'ytInitialData\s*=\s*({.*?});', html)
+                        if m:
+                            data = json.loads(m.group(1))
+                            def find_renderers(obj):
+                                if isinstance(obj, dict):
+                                    if "videoRenderer" in obj:
+                                        yield obj["videoRenderer"]
+                                    for v in obj.values():
+                                        yield from find_renderers(v)
+                                elif isinstance(obj, list):
+                                    for item in obj:
+                                        yield from find_renderers(item)
+                            for v in list(find_renderers(data))[:max_results]:
+                                vid = v.get("videoId")
+                                if vid and len(vid) == 11:
+                                    t = "".join(r.get("text", "") for r in v.get("title", {}).get("runs", [])) or clean
+                                    d = v.get("lengthText", {}).get("simpleText", "00:00")
+                                    o = "".join(r.get("text", "") for r in v.get("ownerText", {}).get("runs", [])) or "YouTube"
+                                    results.append({
+                                        "id": vid,
+                                        "title": t,
+                                        "duration": d,
+                                        "duration_sec": parse_duration_to_sec(d),
+                                        "thumbnail_file": f"thumb_{vid}.jpg",
+                                        "thumbnail_remote": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
+                                        "uploader": o,
+                                        "youtube_url": f"https://www.youtube.com/watch?v={vid}",
+                                    })
+            except Exception as e:
+                logger.debug(f"[SearchHTML] Fallback note: {e}")
 
     if not results:
         raise ValueError(f"No YouTube search results found for query: '{query}'")
@@ -709,44 +744,6 @@ def detect_vibe_queries(seed_name: str, full_title: str, uploader: str) -> List[
             f"{seed_name} mix songs",
             f"{uploader} best hit songs"
         ]
-
-
-async def fetch_youtubei_search(session: aiohttp.ClientSession, query: str, max_items: int = 25) -> List[Dict[str, Any]]:
-    """Ultra-fast YouTube search via official InnerTube endpoint (0.2s - 0.4s)."""
-    url = "https://www.youtube.com/youtubei/v1/search"
-    payload = {
-        'context': {'client': {'clientName': 'WEB', 'clientVersion': '2.20240726.00.00', 'hl': 'en', 'gl': 'US'}},
-        'query': query
-    }
-    try:
-        async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=5.0)) as resp:
-            if resp.status != 200:
-                return []
-            data = await resp.json()
-            videos = []
-            def extract(obj):
-                if isinstance(obj, dict):
-                    if "videoRenderer" in obj:
-                        videos.append(obj["videoRenderer"])
-                    for v in obj.values():
-                        extract(v)
-                elif isinstance(obj, list):
-                    for itm in obj:
-                        extract(itm)
-            extract(data)
-            out = []
-            for v in videos[:max_items]:
-                vid = v.get("videoId")
-                if not vid or len(vid) != 11:
-                    continue
-                title = "".join(x.get("text", "") for x in v.get("title", {}).get("runs", []))
-                dur = v.get("lengthText", {}).get("simpleText", "03:30")
-                by = "".join(x.get("text", "") for x in v.get("ownerText", {}).get("runs", []))
-                out.append({"id": vid, "title": title, "duration": dur, "uploader": by})
-            return out
-    except Exception as e:
-        logger.debug(f"[YouTubeiSearch] error for '{query}': {e}")
-        return []
 
 
 async def fetch_youtube_upnext_feed(session: aiohttp.ClientSession, video_id: str) -> List[Dict[str, Any]]:
