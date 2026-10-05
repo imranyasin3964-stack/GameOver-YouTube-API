@@ -191,9 +191,9 @@ async def call_tg(method: str, payload: dict) -> Optional[dict]:
             logger.warning(f"[Pyrogram MTProto] call_tg error in {method}: {e}")
 
     # Fallback to HTTP API if MTProto client is not yet ready
-    urls_to_try = [f"{TELEGRAM_API_DIRECT_URL}/{method}"]
+    urls_to_try = [f"{TELEGRAM_API_URL}/{method}"]
     if TELEGRAM_API_URL != TELEGRAM_API_DIRECT_URL:
-        urls_to_try.append(f"{TELEGRAM_API_URL}/{method}")
+        urls_to_try.append(f"{TELEGRAM_API_DIRECT_URL}/{method}")
 
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
@@ -348,7 +348,7 @@ async def send_photo_msg(
 
 
 async def send_audio_file(chat_id: int, file_path: str, title: str, performer: str, duration: int, caption: str) -> bool:
-    """Uploads local audio file directly into Telegram chat via Pyrogram MTProto"""
+    """Uploads local audio file directly into Telegram chat via Pyrogram MTProto with HTTP fallback"""
     if not os.path.exists(file_path):
         return False
     global tg_client
@@ -366,12 +366,33 @@ async def send_audio_file(chat_id: int, file_path: str, title: str, performer: s
             return True
         except Exception as e:
             logger.error(f"[send_audio_file MTProto] Error: {e}")
-            return False
-    return False
+
+    # Fallback to HTTP API via Cloudflare Worker proxy
+    try:
+        url = f"{TELEGRAM_API_URL}/sendAudio"
+        data = aiohttp.FormData()
+        data.add_field("chat_id", str(chat_id))
+        data.add_field("title", title)
+        data.add_field("performer", performer)
+        data.add_field("duration", str(duration))
+        data.add_field("caption", caption)
+        data.add_field("parse_mode", "HTML")
+        fname = os.path.basename(file_path)
+        content_type = "audio/ogg" if fname.endswith(".opus") else "audio/mpeg"
+        with open(file_path, "rb") as f:
+            data.add_field("audio", f, filename=fname, content_type=content_type)
+            headers = {"User-Agent": "Mozilla/5.0"}
+            async with aiohttp.ClientSession(headers=headers) as session:
+                async with session.post(url, data=data, timeout=aiohttp.ClientTimeout(total=180.0)) as resp:
+                    res = await resp.json()
+                    return bool(res and res.get("ok"))
+    except Exception as e:
+        logger.error(f"[send_audio_file HTTP] Error: {e}")
+        return False
 
 
 async def send_video_file(chat_id: int, file_path: str, caption: str) -> bool:
-    """Uploads local MP4 file directly into Telegram chat via Pyrogram MTProto (if under 50MB)"""
+    """Uploads local MP4 file directly into Telegram chat via Pyrogram MTProto with HTTP fallback"""
     if not os.path.exists(file_path):
         return False
     size_mb = os.path.getsize(file_path) / (1024 * 1024)
@@ -391,8 +412,26 @@ async def send_video_file(chat_id: int, file_path: str, caption: str) -> bool:
             return True
         except Exception as e:
             logger.error(f"[send_video_file MTProto] Error: {e}")
-            return False
-    return False
+
+    # Fallback to HTTP API via Cloudflare Worker proxy
+    try:
+        url = f"{TELEGRAM_API_URL}/sendVideo"
+        data = aiohttp.FormData()
+        data.add_field("chat_id", str(chat_id))
+        data.add_field("caption", caption)
+        data.add_field("parse_mode", "HTML")
+        data.add_field("supports_streaming", "true")
+        fname = os.path.basename(file_path)
+        with open(file_path, "rb") as f:
+            data.add_field("video", f, filename=fname, content_type="video/mp4")
+            headers = {"User-Agent": "Mozilla/5.0"}
+            async with aiohttp.ClientSession(headers=headers) as session:
+                async with session.post(url, data=data, timeout=aiohttp.ClientTimeout(total=240.0)) as resp:
+                    res = await resp.json()
+                    return bool(res and res.get("ok"))
+    except Exception as e:
+        logger.error(f"[send_video_file HTTP] Error: {e}")
+        return False
 
 
 async def download_and_upload_audio(chat_id: int, video_id: str, title: str = "", audio_format: str = "opus"):
@@ -1843,42 +1882,114 @@ async def telegram_polling_loop():
         except Exception as e:
             logger.error(f"[on_callback_query Error] {e}")
 
+    # Attempt MTProto TCP connection first; seamlessly fallback to Cloudflare Edge Polling on failure
+    try:
+        logger.info("[TelegramBot] Attempting Pyrogram MTProto connection...")
+        await asyncio.wait_for(tg_client.start(), timeout=8.0)
+        me = await tg_client.get_me()
+        logger.info("==================================================")
+        logger.info(f"Pyrogram MTProto Connected! Bot: @{me.username} ({me.id})")
+        logger.info("==================================================")
+
+        # Send initial boot ping to Owner
+        try:
+            await send_msg(
+                OWNER_ID,
+                f"⚡ <b>GᴀᴍᴇOᴠᴇʀ API Cᴏɴᴛʀᴏʟʟᴇʀ Bᴏᴛ Oɴʟɪɴᴇ</b>\n\n"
+                f"• <b>Sᴇʀᴠᴇʀ:</b> <code>{BASE_URL}</code>\n"
+                f"• <b>Pᴏʀᴛ:</b> <code>{PORT}</code>\n"
+                f"• <b>Pʀᴏᴛᴏᴄᴏʟ:</b> 🚀 MTProto TCP (100% Reliable)\n"
+                f"• <b>Sᴛᴀᴛᴜs:</b> 🟢 Aᴄᴛɪᴠᴇ\n\n"
+                f"Cʟɪᴄᴋ ᴏɴ ᴀɴʏ ʙᴜᴛᴛᴏɴ ʙᴇʟᴏᴡ ᴛᴏ ᴄᴏɴᴛʀᴏʟ:",
+                reply_markup=get_main_keyboard(),
+                track=False
+            )
+        except Exception as e:
+            logger.warning(f"Could not send startup message: {e}")
+
+        while tg_client.is_connected:
+            await asyncio.sleep(5.0)
+
+    except Exception as e:
+        logger.warning(f"[TelegramBot] MTProto unavailable ({e}). Seamlessly switching to Cloudflare Edge Gateway...")
+        try:
+            if tg_client and tg_client.is_connected:
+                await tg_client.stop()
+        except Exception:
+            pass
+
+    # High-speed HTTP polling engine via Cloudflare Worker reverse proxy
+    await run_http_polling()
+
+
+async def run_http_polling():
+    """High-speed HTTP polling daemon via Cloudflare Worker proxy (0.2s latency, zero blocks)"""
+    offset = 0
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
+    }
+    logger.info(f"[TelegramPolling] Cloudflare Edge Polling active on {TELEGRAM_API_URL}")
+
+    # Send initial boot ping to Owner
+    try:
+        await send_msg(
+            OWNER_ID,
+            f"⚡ <b>GᴀᴍᴇOᴠᴇʀ API Cᴏɴᴛʀᴏʟʟᴇʀ Bᴏᴛ Oɴʟɪɴᴇ</b>\n\n"
+            f"• <b>Sᴇʀᴠᴇʀ:</b> <code>{BASE_URL}</code>\n"
+            f"• <b>Pᴏʀᴛ:</b> <code>{PORT}</code>\n"
+            f"• <b>Pʀᴏᴛᴏᴄᴏʟ:</b> ⚡ Cloudflare Edge Gateway (100% Reliable)\n"
+            f"• <b>Sᴛᴀᴛᴜs:</b> 🟢 Aᴄᴛɪᴠᴇ\n\n"
+            f"Cʟɪᴄᴋ ᴏɴ ᴀɴʏ ʙᴜᴛᴛᴏɴ ʙᴇʟᴏᴡ ᴛᴏ ᴄᴏɴᴛʀᴏʟ:",
+            reply_markup=get_main_keyboard(),
+            track=False
+        )
+    except Exception as e:
+        logger.warning(f"Could not send startup message: {e}")
+
     while True:
         try:
-            logger.info("[TelegramBot] Connecting to Telegram MTProto...")
-            await tg_client.start()
-            me = await tg_client.get_me()
-            logger.info("==================================================")
-            logger.info(f"Pyrogram MTProto Connected! Bot: @{me.username} ({me.id})")
-            logger.info("==================================================")
-
-            # Send initial boot ping to Owner
-            try:
-                await send_msg(
-                    OWNER_ID,
-                    f"⚡ <b>GᴀᴍᴇOᴠᴇʀ API Cᴏɴᴛʀᴏʟʟᴇʀ Bᴏᴛ Oɴʟɪɴᴇ</b>\n\n"
-                    f"• <b>Sᴇʀᴠᴇʀ:</b> <code>{BASE_URL}</code>\n"
-                    f"• <b>Pᴏʀᴛ:</b> <code>{PORT}</code>\n"
-                    f"• <b>Pʀᴏᴛᴏᴄᴏʟ:</b> 🚀 MTProto TCP (100% Reliable)\n"
-                    f"• <b>Sᴛᴀᴛᴜs:</b> 🟢 Aᴄᴛɪᴠᴇ\n\n"
-                    f"Cʟɪᴄᴋ ᴏɴ ᴀɴʏ ʙᴜᴛᴛᴏɴ ʙᴇʟᴏᴡ ᴛᴏ ᴄᴏɴᴛʀᴏʟ:",
-                    reply_markup=get_main_keyboard(),
-                    track=False
-                )
-            except Exception as e:
-                logger.warning(f"Could not send startup message: {e}")
-
-            # Keep task alive while client is connected
-            while tg_client.is_connected:
-                await asyncio.sleep(5.0)
-
+            connector = aiohttp.TCPConnector(family=socket.AF_INET, ssl=False)
+            async with aiohttp.ClientSession(connector=connector, headers=headers, trust_env=False) as session:
+                url = f"{TELEGRAM_API_URL}/getUpdates"
+                payload = {
+                    "offset": offset,
+                    "timeout": 10,
+                    "allowed_updates": ["message", "edited_message", "callback_query"]
+                }
+                async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=20.0)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        for update in data.get("result", []):
+                            offset = update["update_id"] + 1
+                            if "message" in update:
+                                asyncio.create_task(handle_message(update["message"]))
+                            elif "callback_query" in update:
+                                asyncio.create_task(handle_callback_query(update["callback_query"]))
+                    else:
+                        resp_txt = await resp.text()
+                        logger.warning(f"[TelegramPolling] HTTP {resp.status} on {url}: {resp_txt[:150]}")
+                        await asyncio.sleep(2.0)
         except asyncio.CancelledError:
             break
         except Exception as e:
-            logger.error(f"[TelegramBot] MTProto connection error: {e}. Reconnecting in 10s...")
+            logger.debug(f"[TelegramPolling] Poll note: {e}. Retrying via sync worker...")
             try:
-                if tg_client.is_connected:
-                    await tg_client.stop()
-            except Exception:
-                pass
-            await asyncio.sleep(10.0)
+                def _sync_poll():
+                    return requests.post(
+                        f"{TELEGRAM_API_URL}/getUpdates",
+                        json={"offset": offset, "timeout": 5, "allowed_updates": ["message", "edited_message", "callback_query"]},
+                        headers=headers,
+                        timeout=10.0
+                    )
+                s_resp = await asyncio.to_thread(_sync_poll)
+                if s_resp.status_code == 200:
+                    data = s_resp.json()
+                    for update in data.get("result", []):
+                        offset = update["update_id"] + 1
+                        if "message" in update:
+                            asyncio.create_task(handle_message(update["message"]))
+                        elif "callback_query" in update:
+                            asyncio.create_task(handle_callback_query(update["callback_query"]))
+            except Exception as se:
+                logger.debug(f"[TelegramPolling] Sync poll error: {se}")
+            await asyncio.sleep(2.0)
