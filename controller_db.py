@@ -3,7 +3,7 @@ import time
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 
-DB_PATH = Path(__file__).resolve().parent / "controller.sqlite3"
+from config import DB_PATH
 DEFAULT_OWNER_ID = 6805412676
 
 

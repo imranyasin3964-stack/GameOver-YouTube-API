@@ -116,6 +116,22 @@ async def on_startup():
     # Start background Telegram Controller & Logger Bot
     from telegram_bot import telegram_polling_loop
     asyncio.create_task(telegram_polling_loop())
+    # Start 24/7 keep-alive self-ping worker for Hugging Face Spaces
+    asyncio.create_task(keep_alive_worker())
+
+
+async def keep_alive_worker():
+    """Pings local health endpoint every 10 minutes to prevent Hugging Face Spaces sleep."""
+    await asyncio.sleep(60)
+    logger.info("[KeepAlive] Started 24/7 anti-sleep heartbeat worker.")
+    while True:
+        try:
+            await asyncio.sleep(600)
+            async with aiohttp.ClientSession() as s:
+                async with s.get(f"http://127.0.0.1:{PORT}/health", timeout=aiohttp.ClientTimeout(total=5.0)) as r:
+                    pass
+        except Exception:
+            pass
 
 
 @app.get("/favicon.ico", include_in_schema=False)
@@ -156,7 +172,7 @@ async def home_dashboard():
             <div class="header">
                 <div>
                     <h1 style="margin:0; font-size:1.75rem;">🚀 GameOver YouTube API</h1>
-                    <p style="margin:0.25rem 0 0 0; color:#94a3b8;">High-Speed Private Microservice on Linode VPS</p>
+                    <p style="margin:0.25rem 0 0 0; color:#94a3b8;">High-Speed Private Microservice on Hugging Face Cloud</p>
                 </div>
                 <div class="badge">ONLINE (Port {PORT})</div>
             </div>
