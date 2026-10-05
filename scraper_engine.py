@@ -150,7 +150,11 @@ async def search_youtube_web(query: str) -> Optional[Dict[str, str]]:
     if CF_WORKER_URL:
         try:
             cf_url = f"{CF_WORKER_URL.rstrip('/')}/search?query={urllib.parse.quote(clean_query)}"
-            async with aiohttp.ClientSession() as cf_session:
+            cf_headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
+                "Accept": "application/json",
+            }
+            async with aiohttp.ClientSession(headers=cf_headers) as cf_session:
                 async with cf_session.get(cf_url, timeout=aiohttp.ClientTimeout(total=4.0)) as cf_resp:
                     if cf_resp.status == 200:
                         cf_data = await cf_resp.json()
@@ -241,26 +245,51 @@ async def search_youtube_full(query: str, max_results: int = 5) -> Dict[str, Any
     if CF_WORKER_URL:
         try:
             cf_url = f"{CF_WORKER_URL.rstrip('/')}/search?query={urllib.parse.quote(clean)}"
-            async with aiohttp.ClientSession() as cf_session:
-                async with cf_session.get(cf_url, timeout=aiohttp.ClientTimeout(total=5.0)) as cf_resp:
+            cf_headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
+                "Accept": "application/json",
+            }
+            async with aiohttp.ClientSession(headers=cf_headers) as cf_session:
+                async with cf_session.get(cf_url, timeout=aiohttp.ClientTimeout(total=8.0)) as cf_resp:
                     if cf_resp.status == 200:
                         cf_data = await cf_resp.json()
                         if cf_data.get("id"):
                             primary_id = cf_data["id"]
                             primary_thumb = cf_data.get("thumbnail_remote") or f"https://i.ytimg.com/vi/{primary_id}/hqdefault.jpg"
                             await save_thumbnail_local(primary_id, primary_thumb)
+
+                            raw_results = cf_data.get("results") or []
+                            formatted_results = []
+                            for r in raw_results:
+                                r_id = r.get("id")
+                                if not r_id:
+                                    continue
+                                r_thumb = r.get("thumbnail_remote") or f"https://i.ytimg.com/vi/{r_id}/hqdefault.jpg"
+                                formatted_results.append({
+                                    "id": r_id,
+                                    "title": r.get("title", clean),
+                                    "duration": r.get("duration", "03:30"),
+                                    "duration_sec": r.get("duration_sec", 210),
+                                    "thumbnail_file": f"thumb_{r_id}.jpg",
+                                    "thumbnail_remote": r_thumb,
+                                    "uploader": r.get("uploader", "YouTube"),
+                                    "youtube_url": r.get("youtube_url") or f"https://www.youtube.com/watch?v={r_id}",
+                                })
+
+                            primary_obj = {
+                                "id": primary_id,
+                                "title": cf_data.get("title", clean),
+                                "duration": cf_data.get("duration", "03:30"),
+                                "duration_sec": cf_data.get("duration_sec", 210),
+                                "thumbnail_file": f"thumb_{primary_id}.jpg",
+                                "thumbnail_remote": primary_thumb,
+                                "uploader": cf_data.get("uploader", "YouTube"),
+                                "youtube_url": cf_data.get("youtube_url") or f"https://www.youtube.com/watch?v={primary_id}",
+                            }
+
                             return {
-                                "primary": {
-                                    "id": primary_id,
-                                    "title": cf_data.get("title", clean),
-                                    "duration": cf_data.get("duration", "03:30"),
-                                    "duration_sec": cf_data.get("duration_sec", 210),
-                                    "thumbnail_file": f"thumb_{primary_id}.jpg",
-                                    "thumbnail_remote": primary_thumb,
-                                    "uploader": cf_data.get("uploader", "YouTube"),
-                                    "youtube_url": cf_data.get("youtube_url") or f"https://www.youtube.com/watch?v={primary_id}",
-                                },
-                                "results": cf_data.get("results") or []
+                                "primary": primary_obj,
+                                "results": formatted_results if formatted_results else [primary_obj]
                             }
         except Exception as cf_err:
             logger.debug(f"[SearchFull] CF Edge search note: {cf_err}")
@@ -373,8 +402,12 @@ async def fetch_duration_web(video_id: str) -> Tuple[int, str]:
     if CF_WORKER_URL:
         try:
             cf_url = f"{CF_WORKER_URL.rstrip('/')}/search?query={video_id}"
-            async with aiohttp.ClientSession() as session:
-                async with session.get(cf_url, timeout=aiohttp.ClientTimeout(total=2.0)) as resp:
+            cf_headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
+                "Accept": "application/json",
+            }
+            async with aiohttp.ClientSession(headers=cf_headers) as session:
+                async with session.get(cf_url, timeout=aiohttp.ClientTimeout(total=4.0)) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         sec = data.get("duration_sec")

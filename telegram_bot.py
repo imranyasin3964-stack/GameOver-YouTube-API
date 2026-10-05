@@ -18,6 +18,7 @@ from pyrogram.types import (
     ReplyKeyboardMarkup,
     KeyboardButton,
     ReplyKeyboardRemove,
+    LinkPreviewOptions,
 )
 
 import controller_db
@@ -120,7 +121,7 @@ async def call_tg(method: str, payload: dict) -> Optional[dict]:
                 if kb is not None:
                     kwargs["reply_markup"] = kb
                 if disable_preview:
-                    kwargs["disable_web_page_preview"] = True
+                    kwargs["link_preview_options"] = LinkPreviewOptions(is_disabled=True)
                 msg = await tg_client.send_message(chat_id, text, parse_mode=ParseMode.HTML, **kwargs)
                 return {"ok": True, "result": {"message_id": msg.id}}
 
@@ -137,7 +138,7 @@ async def call_tg(method: str, payload: dict) -> Optional[dict]:
                 if kb is not None:
                     kwargs["reply_markup"] = kb
                 if disable_preview:
-                    kwargs["disable_web_page_preview"] = True
+                    kwargs["link_preview_options"] = LinkPreviewOptions(is_disabled=True)
                 msg = await tg_client.edit_message_text(chat_id, message_id, text, parse_mode=ParseMode.HTML, **kwargs)
                 return {"ok": True, "result": {"message_id": msg.id if msg else message_id}}
 
@@ -283,6 +284,31 @@ async def send_photo_msg(
     # Tier 1: Check local cache on disk (Instant MTProto photo transfer)
     if video_id:
         local_thumb = CACHE_DIR / f"thumb_{video_id}.jpg"
+        if not local_thumb.is_file() or local_thumb.stat().st_size <= 500:
+            # Download thumbnail quickly to disk for instant, guaranteed MTProto delivery
+            try:
+                t_fetch_urls = [
+                    f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg",
+                    f"https://i.ytimg.com/vi/{video_id}/maxresdefault.jpg",
+                ]
+                if photo_url and photo_url.startswith("http") and photo_url not in t_fetch_urls:
+                    t_fetch_urls.insert(0, photo_url)
+                for tf_u in t_fetch_urls:
+                    try:
+                        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/127.0.0.0 Safari/537.36"}
+                        async with aiohttp.ClientSession(headers=headers) as s:
+                            async with s.get(tf_u, timeout=aiohttp.ClientTimeout(total=3.0)) as r:
+                                if r.status == 200:
+                                    img_bytes = await r.read()
+                                    if len(img_bytes) > 500:
+                                        local_thumb.parent.mkdir(parents=True, exist_ok=True)
+                                        local_thumb.write_bytes(img_bytes)
+                                        break
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+
         if local_thumb.is_file() and local_thumb.stat().st_size > 500:
             if tg_client and tg_client.is_connected:
                 try:
@@ -673,12 +699,13 @@ async def broadcast_api_log(log_data: dict):
         ]
     }
 
-    admins = controller_db.get_all_admins()
-    for a in admins:
+    admin_ids = {a["user_id"] for a in controller_db.get_all_admins()}
+    admin_ids.add(OWNER_ID)
+    for uid in admin_ids:
         try:
-            await send_msg(a["user_id"], text, reply_markup=reply_markup, track=True)
+            await send_msg(uid, text, reply_markup=reply_markup, track=True)
         except Exception as e:
-            logger.debug(f"Failed to send log to admin {a['user_id']}: {e}")
+            logger.debug(f"Failed to send log to admin {uid}: {e}")
 
 
 def get_flag_emoji(country_code: str) -> str:
@@ -1256,7 +1283,11 @@ async def execute_api_test(chat_id: int, input_text: str, forced_mode: Optional[
     status_code = 0
 
     try:
-        async with aiohttp.ClientSession() as session:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
+            "Accept": "application/json",
+        }
+        async with aiohttp.ClientSession(headers=headers) as session:
             try:
                 async with session.get(local_target, timeout=aiohttp.ClientTimeout(total=45.0)) as resp:
                     status_code = resp.status
@@ -1286,9 +1317,9 @@ async def execute_api_test(chat_id: int, input_text: str, forced_mode: Optional[
             await send_msg(chat_id, err_msg)
         return
 
-    if not data or data.get("status") == "error":
-        err_detail = data.get("error", "Unknown API error") if data else "Empty response"
-        err_msg = f"❌ <b>API Eʀʀᴏʀ:</b> <code>{err_detail}</code>"
+    if not data or data.get("status") != "success" or not data.get("id"):
+        err_detail = (data.get("detail") or data.get("error")) if isinstance(data, dict) else "No results found"
+        err_msg = f"❌ <b>API Eʀʀᴏʀ:</b> <code>{err_detail}</code>\n\nPʟᴇᴀsᴇ ᴄʜᴇᴄᴋ ʏᴏᴜʀ sᴘᴇʟʟɪɴɢ ᴏʀ ᴛʀʏ ᴀɴᴏᴛʜᴇʀ sᴏɴɢ ɴᴀᴍᴇ."
         if loading_msg_id:
             await edit_msg(chat_id, loading_msg_id, err_msg)
         else:
@@ -1298,12 +1329,12 @@ async def execute_api_test(chat_id: int, input_text: str, forced_mode: Optional[
     # If Search or song query: Display rich 16:9 thumbnail photo card with Audio & Video download buttons
     if api_label == "Search":
         vid_id = data.get("id", "")
-        title = data.get("title", "Unknown")
-        dur_str = data.get("duration", "00:00")
-        dur_sec = data.get("duration_sec", 0)
+        title = data.get("title", input_text)
+        dur_str = data.get("duration", "03:30")
+        dur_sec = data.get("duration_sec", 210)
         uploader = data.get("uploader", "YouTube")
         yt_url = data.get("youtube_url", f"https://www.youtube.com/watch?v={vid_id}")
-        thumb_url = f"https://i.ytimg.com/vi/{vid_id}/maxresdefault.jpg"
+        thumb_url = data.get("thumbnail_remote") or f"https://i.ytimg.com/vi/{vid_id}/maxresdefault.jpg"
 
         caption = (
             f"🎵 <b>{title}</b>\n\n"
@@ -1578,12 +1609,19 @@ async def handle_message(msg: dict):
     if not user_id or not chat_id or not text:
         return
 
+    # Never process bot's own messages or incoming messages from bots
+    bot_id_str = BOT_TOKEN.split(":")[0]
+    if from_user.get("is_bot") or str(user_id) == bot_id_str:
+        return
+
     is_adm, role = (True, "owner") if user_id == OWNER_ID else controller_db.is_admin(user_id)
     if not is_adm:
-        await send_msg(
-            chat_id,
-            f"🚫 <b>Aᴄᴄᴇss Dᴇɴɪᴇᴅ</b>\nYᴏᴜ ᴀʀᴇ ɴᴏᴛ ᴀᴜᴛʜᴏʀɪᴢᴇᴅ ᴛᴏ ᴜsᴇ ᴛʜɪs ᴄᴏɴᴛʀᴏʟʟᴇʀ.\nCᴏɴᴛᴀᴄᴛ Oᴡɴᴇʀ: {OWNER_HANDLE}"
-        )
+        # Only reply Access Denied to explicit user commands, never on arbitrary chatter or loop
+        if text.startswith("/") or text in ("⚡ API Eɴᴅᴘᴏɪɴᴛs", "🔍 Tᴇsᴛ Sᴇᴀʀᴄʜ", "📊 Sᴛᴀᴛs"):
+            await send_msg(
+                chat_id,
+                f"🚫 <b>Aᴄᴄᴇss Dᴇɴɪᴇᴅ</b>\nYᴏᴜ ᴀʀᴇ ɴᴏᴛ ᴀᴜᴛʜᴏʀɪᴢᴇᴅ ᴛᴏ ᴜsᴇ ᴛʜɪs ᴄᴏɴᴛʀᴏʟʟᴇʀ.\nCᴏɴᴛᴀᴄᴛ Oᴡɴᴇʀ: {OWNER_HANDLE}"
+            )
         return
 
     t_upper = text.strip().upper()
@@ -1822,6 +1860,14 @@ async def telegram_polling_loop():
     @tg_client.on_message()
     async def _on_pyrogram_message(client, message):
         try:
+            # Ignore outgoing messages and bot-sent messages to avoid infinite recursive loops
+            if getattr(message, "outgoing", False):
+                return
+            if not message.from_user or getattr(message.from_user, "is_bot", False):
+                return
+            if client.me and message.from_user.id == client.me.id:
+                return
+
             first_name = message.from_user.first_name if message.from_user else "User"
             chat_title = message.chat.title if message.chat.title else "Private Chat"
 

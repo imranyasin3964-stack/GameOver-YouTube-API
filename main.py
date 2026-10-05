@@ -4,6 +4,7 @@ import logging
 import asyncio
 from pathlib import Path
 from typing import Optional
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Query, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse, StreamingResponse, HTMLResponse
@@ -72,10 +73,33 @@ logging.getLogger("uvicorn.access").addFilter(scanner_filter)
 
 logger = logging.getLogger("GameOverAPI")
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("==================================================")
+    logger.info(f"Starting GameOver YouTube API on {HOST}:{PORT}")
+    logger.info(f"Public Base URL: {BASE_URL}")
+    logger.info(f"NVMe Cache Directory: {CACHE_DIR}")
+    logger.info("==================================================")
+    # Index pre-existing disk cache into SQLite DB so nothing is re-downloaded
+    scan_and_index_cache_directory(CACHE_DIR)
+    # Start background 24h cache cleaner
+    asyncio.create_task(cache_cleaner_task())
+    # Start background Telegram Controller & Logger Bot
+    from telegram_bot import telegram_polling_loop
+    asyncio.create_task(telegram_polling_loop())
+    # Start 24/7 keep-alive self-ping worker for Hugging Face Spaces
+    asyncio.create_task(keep_alive_worker())
+    # Start 24h Space Auto-Reboot worker
+    asyncio.create_task(space_auto_reboot_worker())
+    yield
+
+
 app = FastAPI(
     title="GameOver YouTube Streaming API",
     description="High-Speed Dedicated Private YouTube Audio & Video Engine for Telegram Music Bots",
     version="2.0.0",
+    lifespan=lifespan,
 )
 
 # Known vulnerability scanner probes to drop instantly
@@ -100,26 +124,6 @@ app.add_middleware(
 )
 
 START_TIME = time.time()
-
-
-@app.on_event("startup")
-async def on_startup():
-    logger.info("==================================================")
-    logger.info(f"Starting GameOver YouTube API on {HOST}:{PORT}")
-    logger.info(f"Public Base URL: {BASE_URL}")
-    logger.info(f"NVMe Cache Directory: {CACHE_DIR}")
-    logger.info("==================================================")
-    # Index pre-existing disk cache into SQLite DB so nothing is re-downloaded
-    scan_and_index_cache_directory(CACHE_DIR)
-    # Start background 24h cache cleaner
-    asyncio.create_task(cache_cleaner_task())
-    # Start background Telegram Controller & Logger Bot
-    from telegram_bot import telegram_polling_loop
-    asyncio.create_task(telegram_polling_loop())
-    # Start 24/7 keep-alive self-ping worker for Hugging Face Spaces
-    asyncio.create_task(keep_alive_worker())
-    # Start 24h Space Auto-Reboot worker
-    asyncio.create_task(space_auto_reboot_worker())
 
 
 async def keep_alive_worker():
@@ -355,12 +359,36 @@ async def search_media(
         search_data = await search_youtube_full(clean_query, max_results=5)
     except ValueError as ve:
         logger.warning(f"No results for '{clean_query}': {ve}")
+        elapsed = round(time.time() - t_start, 2)
+        log_data = {
+            "ip": client_ip,
+            "query": clean_query,
+            "type": "search",
+            "quality": "fast",
+            "cached": False,
+            "elapsed_sec": elapsed,
+            "title": f"❌ Not Found: {clean_query}",
+            "response": {"status": "error", "detail": f"No YouTube results found for: '{clean_query}'"}
+        }
+        asyncio.create_task(broadcast_api_log(log_data))
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"No YouTube results found for: '{clean_query}'"
         )
     except Exception as e:
         logger.error(f"Search failed for '{clean_query}': {e}", exc_info=True)
+        elapsed = round(time.time() - t_start, 2)
+        log_data = {
+            "ip": client_ip,
+            "query": clean_query,
+            "type": "search",
+            "quality": "error",
+            "cached": False,
+            "elapsed_sec": elapsed,
+            "title": f"❌ Error: {clean_query}",
+            "response": {"status": "error", "detail": str(e)}
+        }
+        asyncio.create_task(broadcast_api_log(log_data))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to search YouTube: {str(e)}"
@@ -674,12 +702,36 @@ async def download_media(
         )
     except ValueError as ve:
         logger.warning(f"No results for download '{clean_query}': {ve}")
+        elapsed = round(time.time() - start_time_req, 2)
+        log_data = {
+            "ip": client_ip,
+            "query": clean_query,
+            "type": media_type,
+            "quality": quality if media_type == "video" else (audio_fmt or "opus"),
+            "cached": False,
+            "elapsed_sec": elapsed,
+            "title": f"❌ Not Found: {clean_query}",
+            "response": {"status": "error", "detail": f"No YouTube results found for: '{clean_query}'"}
+        }
+        asyncio.create_task(broadcast_api_log(log_data))
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"No YouTube results found for: '{clean_query}'"
         )
     except Exception as e:
         logger.error(f"Resolution failed for query '{clean_query}' [{media_type}]: {e}", exc_info=True)
+        elapsed = round(time.time() - start_time_req, 2)
+        log_data = {
+            "ip": client_ip,
+            "query": clean_query,
+            "type": media_type,
+            "quality": quality if media_type == "video" else (audio_fmt or "opus"),
+            "cached": False,
+            "elapsed_sec": elapsed,
+            "title": f"❌ Error: {clean_query}",
+            "response": {"status": "error", "detail": str(e)}
+        }
+        asyncio.create_task(broadcast_api_log(log_data))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to process YouTube query: {str(e)}"
