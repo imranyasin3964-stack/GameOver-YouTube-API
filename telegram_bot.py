@@ -49,17 +49,25 @@ async def call_tg(method: str, payload: dict) -> Optional[dict]:
     if TELEGRAM_API_URL != f"{TELEGRAM_API_DIRECT_URL}/{method}":
         urls_to_try.append(f"{TELEGRAM_API_DIRECT_URL}/{method}")
 
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
+    }
+
     for url in urls_to_try:
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=8.0)) as resp:
+            connector = aiohttp.TCPConnector(ssl=False)
+            async with aiohttp.ClientSession(connector=connector, headers=headers, trust_env=False) as session:
+                async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=10.0)) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         if not data.get("ok"):
                             logger.warning(f"[TelegramAPI] Error in {method}: {data.get('description')}")
                         return data
+                    else:
+                        resp_txt = await resp.text()
+                        logger.warning(f"[TelegramAPI] HTTP {resp.status} on {url} for {method}: {resp_txt[:200]}")
         except Exception as e:
-            logger.debug(f"[TelegramAPI] Request attempt failed on {url} for {method}: {e}")
+            logger.warning(f"[TelegramAPI] Request attempt failed on {url} for {method}: {type(e).__name__}: {e}")
             continue
 
     logger.error(f"[TelegramAPI] All connection attempts failed for {method}")
@@ -1652,16 +1660,21 @@ async def telegram_polling_loop():
     except Exception as e:
         logger.warning(f"Could not send startup message: {e}")
 
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
+    }
+
     while True:
         try:
-            url = f"{TELEGRAM_API_URL}/getUpdates"
-            payload = {
-                "offset": offset,
-                "timeout": 20,
-                "allowed_updates": ["message", "edited_message", "callback_query", "inline_query"]
-            }
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=25.0)) as resp:
+            connector = aiohttp.TCPConnector(ssl=False)
+            async with aiohttp.ClientSession(connector=connector, headers=headers, trust_env=False) as session:
+                url = f"{TELEGRAM_API_URL}/getUpdates"
+                payload = {
+                    "offset": offset,
+                    "timeout": 15,
+                    "allowed_updates": ["message", "edited_message", "callback_query", "inline_query"]
+                }
+                async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=20.0)) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         for update in data.get("result", []):
@@ -1670,8 +1683,12 @@ async def telegram_polling_loop():
                                 asyncio.create_task(handle_message(update["message"]))
                             elif "callback_query" in update:
                                 asyncio.create_task(handle_callback_query(update["callback_query"]))
+                    else:
+                        resp_txt = await resp.text()
+                        logger.warning(f"[TelegramPolling] getUpdates HTTP {resp.status} on {url}: {resp_txt[:150]}")
+                        await asyncio.sleep(2.0)
         except asyncio.CancelledError:
             break
         except Exception as e:
-            logger.debug(f"[TelegramPolling] Connection note: {e}")
+            logger.warning(f"[TelegramPolling] Connection note: {type(e).__name__}: {e}")
             await asyncio.sleep(2.0)
