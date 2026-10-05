@@ -55,7 +55,14 @@ export default {
  * 100% bypasses YouTube datacenter IP blocking.
  */
 async function handleEdgeSearch(request, url, workerOrigin, startTime) {
-  const queryParam = url.searchParams.get("query") || url.searchParams.get("q") || url.searchParams.get("url") || "";
+  let queryParam = url.searchParams.get("query") || url.searchParams.get("q") || url.searchParams.get("url") || url.searchParams.get("search_query") || "";
+
+  if (!queryParam && request.method === "POST") {
+    try {
+      const body = await request.clone().json();
+      queryParam = body.query || body.q || body.url || body.search_query || "";
+    } catch (_) {}
+  }
   const cleanQuery = queryParam.trim();
 
   if (!cleanQuery) {
