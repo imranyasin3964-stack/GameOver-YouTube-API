@@ -10,7 +10,7 @@ import html
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple, List
 
-from config import CACHE_DIR, CF_WORKER_URL, RENDER_SEARCH_URL, YOUTUBE_API_KEY
+from config import CACHE_DIR, CF_WORKER_URL, RENDER_SEARCH_URL, YOUTUBE_API_KEY, SHRUTI_AUTOPLAY_API_KEY
 
 logger = logging.getLogger("GameOverAPI.ScraperEngine")
 
@@ -1397,4 +1397,171 @@ async def resolve_smart_autoplay(seed_query: str, target_count: int = 35) -> Dic
         "elapsed_sec": elapsed,
         "developer": "@XHamsterFounders"
     }
+
+
+async def fetch_shruti_autoplay(session: aiohttp.ClientSession, video_id: str, max_tracks: int = 15) -> List[Dict[str, Any]]:
+    """
+    Fetches official YouTube Mix / Radio recommendations via Shruti Autoplay API.
+    Zero botguard, 100% authentic YouTube Mix, returns instant tracks with HD thumbnails.
+    """
+    clean_vid = extract_video_id(video_id) or video_id.strip()
+    if not clean_vid or len(clean_vid) != 11:
+        return []
+
+    api_key = SHRUTI_AUTOPLAY_API_KEY or "ShrutiBotsDXAaF5rEQAFCjwls2mSn"
+    url = f"https://api.shrutibots.site/autoplay?video_id={clean_vid}&api_key={api_key}"
+    try:
+        timeout = aiohttp.ClientTimeout(total=5.5)
+        async with session.get(url, timeout=timeout) as resp:
+            if resp.status == 200:
+                data = await resp.json(content_type=None)
+                raw_tracks = data.get("tracks", [])
+                out = []
+                for t in raw_tracks:
+                    t_vid = t.get("video_id")
+                    t_title = t.get("title")
+                    t_dur = t.get("duration", 210)
+                    if isinstance(t_dur, int):
+                        dur_str = f"{t_dur // 60:02d}:{t_dur % 60:02d}"
+                        dur_sec = t_dur
+                    else:
+                        dur_str = str(t_dur)
+                        dur_sec = parse_duration_to_sec(dur_str) or 210
+
+                    if t_vid and t_title and len(t_vid) == 11:
+                        out.append({
+                            "id": t_vid,
+                            "title": html.unescape(t_title).strip(),
+                            "uploader": html.unescape(t.get("artist") or "YouTube").strip(),
+                            "thumbnail": t.get("thumbnail") or f"https://i.ytimg.com/vi/{t_vid}/hqdefault.jpg",
+                            "duration": dur_str,
+                            "duration_sec": dur_sec,
+                            "from_mix": bool(t.get("from_mix", True)),
+                            "url": f"https://www.youtube.com/watch?v={t_vid}",
+                        })
+                        if len(out) >= max_tracks:
+                            break
+                if out:
+                    logger.info(f"[ShrutiAutoplay] Successfully fetched {len(out)} tracks for {clean_vid}")
+                    return out
+    except Exception as e:
+        logger.debug(f"[ShrutiAutoplay] Shruti API note for {clean_vid}: {e}")
+    return []
+
+
+async def resolve_shruti_autoplay(seed_query: str, target_count: int = 35) -> Dict[str, Any]:
+    """
+    Dedicated Autoplay 2 Resolver Engine (Shruti Official YouTube Mix & Radio Recommendations):
+    - Paid Premium Engine: Zero botguard, 100% authentic YouTube Mix.
+    - Resolves seed song name or YouTube URL.
+    - Expands with follow-up mix tracks to return full 25–40 tracks.
+    - Returns full tracks list, indexes dict, and metadata matching standard GameOver API schema.
+    """
+    t0 = time.time()
+    clean = seed_query.strip()
+    seed_id = extract_video_id(clean)
+    seed_title = clean
+    seed_uploader = "YouTube"
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    async with aiohttp.ClientSession(headers=headers) as session:
+        # Step 1: Resolve seed video ID if only name was passed
+        if seed_id:
+            seed_meta = await resolve_video_details_v3(session, seed_id)
+            if seed_meta:
+                seed_title = seed_meta["title"]
+                seed_uploader = seed_meta["uploader"]
+            else:
+                oembed = await fetch_oembed_info(seed_id)
+                if oembed:
+                    seed_title = oembed.get("title", clean)
+                    seed_uploader = oembed.get("author_name", "YouTube")
+        else:
+            seed_cands = await fetch_candidates_v3(session, clean, max_items=5)
+            if seed_cands:
+                seed_id = seed_cands[0]["id"]
+                seed_title = seed_cands[0]["title"]
+                seed_uploader = seed_cands[0]["uploader"]
+            else:
+                seed_id = "Umqb9KENgmk"
+
+        # Step 2: Primary fetch from Shruti Autoplay API
+        first_batch = await fetch_shruti_autoplay(session, seed_id, max_tracks=15)
+
+        all_candidates = list(first_batch)
+        seen_ids = set([seed_id])
+        for t in first_batch:
+            seen_ids.add(t["id"])
+
+        # Step 3: If target_count > len(first_batch), query follow-up mix tracks in parallel
+        if len(all_candidates) < target_count and first_batch:
+            follow_up_vids = [t["id"] for t in first_batch[:4]]
+            follow_up_tasks = [fetch_shruti_autoplay(session, v, max_tracks=12) for v in follow_up_vids]
+            follow_up_results = await asyncio.gather(*follow_up_tasks, return_exceptions=True)
+            for batch in follow_up_results:
+                if isinstance(batch, list):
+                    for t in batch:
+                        if t["id"] not in seen_ids:
+                            seen_ids.add(t["id"])
+                            all_candidates.append(t)
+                            if len(all_candidates) >= target_count:
+                                break
+
+        # Step 4: Fallback to Google V3 / Vibe Engine if Shruti returned fewer than 25 tracks
+        if len(all_candidates) < min(target_count, 25):
+            logger.info(f"[Autoplay2] Shruti returned {len(all_candidates)} tracks. Backfilling via Google V3...")
+            vibe_res = await resolve_smart_autoplay(clean, target_count=target_count)
+            for t in vibe_res.get("tracks", []):
+                if t["id"] not in seen_ids:
+                    seen_ids.add(t["id"])
+                    all_candidates.append(t)
+                    if len(all_candidates) >= target_count:
+                        break
+
+        # Step 5: Format selected tracks with index
+        selected_tracks = []
+        for i, c in enumerate(all_candidates[:target_count], 1):
+            vid = c["id"]
+            selected_tracks.append({
+                "index": i,
+                "id": vid,
+                "title": c["title"],
+                "duration": c["duration"],
+                "duration_sec": c.get("duration_sec", 210),
+                "thumbnail": c.get("thumbnail") or f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
+                "thumbnail_file": f"thumb_{vid}.jpg",
+                "thumbnail_remote": c.get("thumbnail") or f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
+                "uploader": c.get("uploader", "YouTube"),
+                "url": f"https://www.youtube.com/watch?v={vid}",
+                "youtube_url": f"https://www.youtube.com/watch?v={vid}",
+                "from_mix": bool(c.get("from_mix", True)),
+            })
+
+    # Background thumbnail cache
+    async def _cache_bg(tracks):
+        try:
+            await asyncio.gather(*(save_thumbnail_local(t["id"], t["thumbnail_remote"]) for t in tracks), return_exceptions=True)
+        except Exception:
+            pass
+    asyncio.create_task(_cache_bg(selected_tracks))
+
+    indexes_dict = {f"index_{t['index']}": t for t in selected_tracks}
+    elapsed = round(time.time() - t0, 2)
+    return {
+        "status": "success",
+        "engine": "autoplay2_shruti",
+        "engine_label": "Shruti YouTube Mix / Radio (Autoplay 2)",
+        "seed": clean,
+        "seed_id": seed_id,
+        "seed_title": seed_title,
+        "total": len(selected_tracks),
+        "tracks": selected_tracks,
+        "indexes": indexes_dict,
+        "elapsed_sec": elapsed,
+        "developer": "@XHamsterFounders"
+    }
+
 

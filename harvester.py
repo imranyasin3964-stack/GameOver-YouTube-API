@@ -42,6 +42,7 @@ from scraper_engine import (
     save_thumbnail_local,
     parse_duration_to_sec,
     resolve_smart_autoplay,
+    resolve_shruti_autoplay,
 )
 from engine import convert_media_ffmpeg
 
@@ -214,6 +215,7 @@ class HarvestManager:
         tracks: Optional[List[Dict[str, Any]]] = None,
         target_count: int = 35,
         concurrency: int = 3,
+        engine: str = "vibe",
         notify_callback: Optional[Callable[[str], Any]] = None
     ) -> bool:
         if self.is_running:
@@ -227,9 +229,10 @@ class HarvestManager:
         self.concurrency = max(1, min(5, concurrency))
         self.active_mode = "seed"
         self.selected_genre = f"seed:{seed_query}"
-        self.current_genre = f"📻 Autoplay: {seed_query[:25]}"
-        self.last_status_msg = f"Autoplay Vibe ({self.concurrency} Slots)"
-        self.task = asyncio.create_task(self._run_seed_loop(seed_query, tracks, target_count))
+        engine_tag = "Autoplay 2 (Shruti)" if engine in ("shruti", "autoplay2", "2") else "Autoplay 1 (Vibe)"
+        self.current_genre = f"📻 {engine_tag}: {seed_query[:25]}"
+        self.last_status_msg = f"{engine_tag} ({self.concurrency} Slots)"
+        self.task = asyncio.create_task(self._run_seed_loop(seed_query, tracks, target_count, engine=engine))
         return True
 
     def stop(self) -> bool:
@@ -662,19 +665,25 @@ class HarvestManager:
         self,
         seed_query: str,
         tracks: Optional[List[Dict[str, Any]]],
-        target_count: int
+        target_count: int,
+        engine: str = "vibe"
     ):
-        """Runs Seed Autoplay Vibe harvest: resolves related tracks and caches video+opus for all"""
-        logger.info(f"[Harvester] Seed Autoplay Loop started for '{seed_query}'.")
+        """Runs Seed Autoplay harvest (Vibe AI or Shruti Official Mix): resolves related tracks and caches video+opus for all"""
+        is_shruti = engine in ("shruti", "autoplay2", "2", "mix")
+        engine_label = "Autoplay 2 (Shruti Mix)" if is_shruti else "Autoplay 1 (Vibe AI)"
+        logger.info(f"[Harvester] Seed {engine_label} Loop started for '{seed_query}'.")
 
         # Step 1: If tracks not passed, resolve now
         if not tracks:
-            await self._send_notify(f"🔍 <b>Resolving Autoplay Vibe tracks for:</b> <code>{seed_query}</code>...")
+            await self._send_notify(f"🔍 <b>Resolving {engine_label} tracks for:</b> <code>{seed_query}</code>...")
             try:
-                res = await resolve_smart_autoplay(seed_query, target_count=target_count)
+                if is_shruti:
+                    res = await resolve_shruti_autoplay(seed_query, target_count=target_count)
+                else:
+                    res = await resolve_smart_autoplay(seed_query, target_count=target_count)
                 tracks = res.get("tracks", [])
             except Exception as e:
-                err_msg = f"❌ <b>Failed to resolve autoplay vibe tracks:</b> <code>{e}</code>"
+                err_msg = f"❌ <b>Failed to resolve {engine_label} tracks:</b> <code>{e}</code>"
                 logger.error(err_msg)
                 await self._send_notify(err_msg)
                 self.is_running = False
@@ -682,22 +691,24 @@ class HarvestManager:
                 return
 
         if not tracks:
-            await self._send_notify(f"❌ <b>No related vibe tracks found for:</b> <code>{seed_query}</code>")
+            await self._send_notify(f"❌ <b>No related tracks found via {engine_label} for:</b> <code>{seed_query}</code>")
             self.is_running = False
             self.active_mode = "idle"
             return
 
         await self._send_notify(
-            f"🚀 <b>Seed Autoplay Harvest Started!</b>\n\n"
+            f"🚀 <b>Seed {engine_label} Harvest Started!</b>\n\n"
             f"🎵 <b>Seed Song:</b> <code>{seed_query}</code>\n"
-            f"🔢 <b>Queue:</b> <code>{len(tracks)} Vibe Tracks</code>\n"
+            f"📻 <b>Engine:</b> <code>{engine_label}</code>\n"
+            f"🔢 <b>Queue:</b> <code>{len(tracks)} Tracks</code>\n"
             f"⚡ <b>Parallel Slots:</b> <code>{self.concurrency} Slots</code>\n"
             f"📦 <b>Formats:</b> 🎬 480p Video + 🎙️ 48kHz Opus Audio"
         )
 
         sem = asyncio.Semaphore(self.concurrency)
         queue = asyncio.Queue()
-        label = f"📻 Autoplay: {seed_query[:25]}"
+        short_engine = "Shruti Mix" if is_shruti else "Vibe"
+        label = f"📻 {short_engine}: {seed_query[:22]}"
         for t in tracks:
             await queue.put((label, t))
 
@@ -711,8 +722,9 @@ class HarvestManager:
 
         disk = self.get_disk_stats()
         summary_text = (
-            f"🎉 <b>Seed Autoplay Harvest Completed!</b>\n\n"
+            f"🎉 <b>Seed {engine_label} Harvest Completed!</b>\n\n"
             f"🎵 <b>Seed:</b> <code>{seed_query}</code>\n"
+            f"📻 <b>Engine:</b> <code>{engine_label}</code>\n"
             f"📥 <b>Total Downloaded:</b> <code>{self.total_downloaded}</code>\n"
             f"⏭️ <b>Total Skipped:</b> <code>{self.total_skipped}</code>\n"
             f"❌ <b>Total Failed:</b> <code>{self.total_failed}</code>\n"
@@ -721,7 +733,7 @@ class HarvestManager:
         self.is_running = False
         self.active_mode = "idle"
         self.last_status_msg = "Completed"
-        logger.info("[Harvester] Seed loop completed.")
+        logger.info(f"[Harvester] Seed {engine_label} loop completed.")
         await self._send_notify(summary_text)
 
 
@@ -729,14 +741,23 @@ class HarvestManager:
 harvest_manager = HarvestManager()
 
 
-async def preview_seed_autoplay(seed_query: str, target_count: int = 35) -> Dict[str, Any]:
-    """Generates preview of 25–40 related tracks and caches for one-click download"""
+async def preview_seed_autoplay(seed_query: str, target_count: int = 35, engine: str = "vibe") -> Dict[str, Any]:
+    """Generates preview of 25–40 related tracks via selected engine and caches for one-click download"""
     clean = seed_query.strip()
-    data = await resolve_smart_autoplay(clean, target_count=target_count)
-    cache_id = hashlib.md5(f"{clean}_{time.time()}".encode()).hexdigest()[:8]
+    is_shruti = engine in ("shruti", "autoplay2", "2", "mix")
+    if is_shruti:
+        data = await resolve_shruti_autoplay(clean, target_count=target_count)
+    else:
+        data = await resolve_smart_autoplay(clean, target_count=target_count)
+
+    canonical_engine = "autoplay2" if is_shruti else "vibe"
+    engine_label = "Autoplay 2 (Shruti Mix)" if is_shruti else "Autoplay 1 (Vibe AI)"
+    cache_id = hashlib.md5(f"{clean}_{canonical_engine}_{time.time()}".encode()).hexdigest()[:8]
     SEED_PREVIEWS[cache_id] = {
         "cache_id": cache_id,
         "seed": clean,
+        "engine": canonical_engine,
+        "engine_label": engine_label,
         "data": data,
         "created_at": time.time()
     }
@@ -749,7 +770,11 @@ async def preview_seed_autoplay(seed_query: str, target_count: int = 35) -> Dict
         "cache_id": cache_id,
         "seed": clean,
         "seed_id": data.get("seed_id", ""),
+        "seed_title": data.get("seed_title", clean),
+        "engine": canonical_engine,
+        "engine_label": engine_label,
         "total": data.get("total", len(data.get("tracks", []))),
         "tracks": data.get("tracks", []),
         "elapsed_sec": data.get("elapsed_sec", 0.0)
     }
+

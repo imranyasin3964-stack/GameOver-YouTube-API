@@ -19,7 +19,7 @@ from cache_manager import (
     is_cached,
 )
 from engine import resolve_and_download
-from scraper_engine import search_youtube_full, extract_playlist_full, resolve_smart_autoplay
+from scraper_engine import search_youtube_full, extract_playlist_full, resolve_smart_autoplay, resolve_shruti_autoplay
 from controller_db import (
     check_and_increment_ip,
     scan_and_index_cache_directory,
@@ -569,12 +569,14 @@ async def autoplay_tracks(
     url: Optional[str] = Query(None, description="Song title, search query, or YouTube URL (Placed at end)"),
     query: Optional[str] = Query(None, description="Alternative parameter for song"),
     q: Optional[str] = Query(None, description="Alternative short parameter for song"),
+    engine: Optional[str] = Query("vibe", description="Engine: 'vibe' (Engine 1 - Google V3 Vibe) or 'shruti' / 'autoplay2' (Engine 2 - Shruti YouTube Mix)"),
     limit: int = Query(35, ge=1, le=50, description="Number of tracks to return (default 35)"),
 ):
     """
-    Dedicated Smart Vibe Autoplay API:
+    Dedicated Smart Vibe Autoplay API (Engine 1 / Autoplay 1):
     Returns 35 vibe-matched YouTube songs without audio downloading.
     Anti-spam movie filter ensures no consecutive tracks from the same movie or album!
+    Also supports ?engine=shruti / ?engine=autoplay2 for Engine 2!
     Order: GET /autoplay?url=tum+hi+ho
     """
     target = url or query or q
@@ -608,7 +610,10 @@ async def autoplay_tracks(
     clean_target = target.strip()
     t_start = time.time()
     try:
-        result = await resolve_smart_autoplay(clean_target, target_count=limit)
+        if engine and engine.lower() in ("shruti", "autoplay2", "2", "mix"):
+            result = await resolve_shruti_autoplay(clean_target, target_count=limit)
+        else:
+            result = await resolve_smart_autoplay(clean_target, target_count=limit)
     except Exception as e:
         logger.error(f"Autoplay failed for '{clean_target}': {e}", exc_info=True)
         raise HTTPException(
@@ -621,7 +626,85 @@ async def autoplay_tracks(
     log_data = {
         "ip": client_ip,
         "query": clean_target,
-        "type": "autoplay",
+        "type": "autoplay2" if engine and engine.lower() in ("shruti", "autoplay2", "2", "mix") else "autoplay",
+        "quality": f"{result.get('total', limit)} tracks",
+        "cached": False,
+        "elapsed_sec": elapsed,
+        "title": result.get("seed", clean_target),
+        "response": {
+            "status": "success",
+            "seed": result.get("seed"),
+            "total": result.get("total"),
+            "sample_song": result["tracks"][0]["title"] if result.get("tracks") else "None",
+            "elapsed_sec": elapsed,
+            "developer": "@XHamsterFounders"
+        }
+    }
+    asyncio.create_task(broadcast_api_log(log_data))
+
+    return JSONResponse(content=result)
+
+
+@app.get("/GET/autoplay2")
+@app.get("/autoplay2")
+async def autoplay2_tracks(
+    request: Request,
+    url: Optional[str] = Query(None, description="Song title, search query, or YouTube URL"),
+    query: Optional[str] = Query(None, description="Alternative parameter for song"),
+    q: Optional[str] = Query(None, description="Alternative short parameter for song"),
+    limit: int = Query(35, ge=1, le=50, description="Number of tracks to return (default 35)"),
+):
+    """
+    Dedicated Autoplay 2 API (Shruti Official YouTube Mix & Radio Recommendations):
+    Zero botguard, 100% authentic YouTube Mix tracks.
+    Returns 25–40 curated YouTube Mix tracks matching the seed track.
+    Order: GET /autoplay2?url=tum+hi+ho or GET /autoplay2?url=https://youtube.com/watch?v=...
+    """
+    target = url or query or q
+    if not target:
+        raw_query = request.url.query
+        if "url=" in raw_query:
+            target = raw_query.split("url=", 1)[1]
+        elif "query=" in raw_query:
+            target = raw_query.split("query=", 1)[1].split("&")[0]
+        elif "q=" in raw_query:
+            target = raw_query.split("q=", 1)[1].split("&")[0]
+
+    if not target or not target.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing required parameter: 'url' (e.g. /autoplay2?url=tum+hi+ho)"
+        )
+
+    client_ip = request.client.host if request.client else "127.0.0.1"
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        client_ip = forwarded.split(",")[0].strip()
+
+    allowed, is_blocked, msg = check_and_increment_ip(client_ip)
+    if not allowed:
+        if is_blocked:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=msg)
+        else:
+            raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=msg)
+
+    clean_target = target.strip()
+    t_start = time.time()
+    try:
+        result = await resolve_shruti_autoplay(clean_target, target_count=limit)
+    except Exception as e:
+        logger.error(f"Autoplay2 failed for '{clean_target}': {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to generate autoplay2 recommendations: {str(e)}"
+        )
+
+    # Broadcast log to Telegram Bot admins
+    elapsed = round(time.time() - t_start, 2)
+    log_data = {
+        "ip": client_ip,
+        "query": clean_target,
+        "type": "autoplay2",
         "quality": f"{result.get('total', limit)} tracks",
         "cached": False,
         "elapsed_sec": elapsed,

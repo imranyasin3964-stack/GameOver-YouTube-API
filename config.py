@@ -23,6 +23,7 @@ BASE_URL = os.getenv("BASE_URL", "https://youtubeapiv2.gameoverhostingservice.wo
 CF_WORKER_URL = os.getenv("CF_WORKER_URL", "https://youtubeapiv2.gameoverhostingservice.workers.dev")
 RENDER_SEARCH_URL = os.getenv("RENDER_SEARCH_URL", "https://yt-search-api-hjod.onrender.com")
 YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY", "AIzaSyB7-u3OZbeThZz2RcxIYO6KXRCVQyYh-hI")
+SHRUTI_AUTOPLAY_API_KEY = os.getenv("SHRUTI_AUTOPLAY_API_KEY", "ShrutiBotsDXAaF5rEQAFCjwls2mSn")
 
 # Cache & Storage limits (50 GB Capacity, Permanent Storage - No Auto-Delete)
 MAX_CACHE_SIZE_GB = float(os.getenv("MAX_CACHE_SIZE_GB", "50.0"))

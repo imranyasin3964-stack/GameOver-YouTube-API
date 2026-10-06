@@ -1011,22 +1011,33 @@ async def handle_harvest_menu(chat_id: int, message_id_to_edit: Optional[int] = 
     else:
         await send_msg(chat_id, text, reply_markup=inline_kb)
 
-async def handle_harvest_seed_preview(chat_id: int, user_id: int, seed_input: str):
+async def handle_harvest_seed_preview(chat_id: int, user_id: int, seed_input: str, engine: str = "vibe", message_id_to_edit: Optional[int] = None):
     """
-    Extracts 25–40 related vibe tracks for a song name or YouTube link.
-    Renders an aesthetic preview card with instant [🚀 Download & Cache All] button.
+    Extracts 25–40 related vibe tracks for a song name or YouTube link via Autoplay 1 (Vibe AI) or Autoplay 2 (Shruti Mix).
+    Renders an aesthetic preview card with engine toggle and instant [🚀 Download & Cache All] button.
     """
     clean_seed = seed_input.strip()
-    loading_id = await send_msg(
-        chat_id,
-        f"🔍 <b>Finding related vibe tracks for:</b>\n<code>{clean_seed}</code>\n<i>Resolving YouTube Autoplay Mix (25–35 tracks)...</i>"
-    )
+    is_shruti = engine in ("shruti", "autoplay2", "2", "mix")
+    engine_label = "Autoplay 2 (Shruti Mix)" if is_shruti else "Autoplay 1 (Vibe AI)"
+
+    if message_id_to_edit:
+        await edit_msg(
+            chat_id,
+            message_id_to_edit,
+            f"🔄 <b>Switching to {engine_label}...</b>\n<code>{clean_seed}</code>\n<i>Resolving YouTube Recommendations (25–35 tracks)...</i>"
+        )
+        loading_id = message_id_to_edit
+    else:
+        loading_id = await send_msg(
+            chat_id,
+            f"🔍 <b>Finding related tracks via {engine_label} for:</b>\n<code>{clean_seed}</code>\n<i>Resolving YouTube Recommendations (25–35 tracks)...</i>"
+        )
 
     from harvester import preview_seed_autoplay
     try:
-        preview = await preview_seed_autoplay(clean_seed, target_count=35)
+        preview = await preview_seed_autoplay(clean_seed, target_count=35, engine=engine)
     except Exception as e:
-        err_text = f"❌ <b>Failed to resolve autoplay tracks:</b> <code>{e}</code>"
+        err_text = f"❌ <b>Failed to resolve {engine_label} tracks:</b> <code>{e}</code>"
         if loading_id:
             await edit_msg(chat_id, loading_id, err_text)
         else:
@@ -1035,7 +1046,7 @@ async def handle_harvest_seed_preview(chat_id: int, user_id: int, seed_input: st
 
     tracks = preview.get("tracks", [])
     if not tracks:
-        err_text = f"❌ <b>No related tracks found for:</b> <code>{clean_seed}</code>"
+        err_text = f"❌ <b>No related tracks found via {engine_label} for:</b> <code>{clean_seed}</code>"
         if loading_id:
             await edit_msg(chat_id, loading_id, err_text)
         else:
@@ -1052,18 +1063,19 @@ async def handle_harvest_seed_preview(chat_id: int, user_id: int, seed_input: st
     for i, t in enumerate(tracks[:12], 1):
         t_name = t.get("title", "Unknown")[:38]
         dur = t.get("duration", "03:30")
-        by = t.get("uploader", "YouTube")[:18]
-        t_id = t.get("id", "")
+        by = (t.get("artist") or t.get("uploader") or "YouTube")[:18]
+        t_id = t.get("id") or t.get("video_id", "")
         t_link = f"https://www.youtube.com/watch?v={t_id}" if t_id else ""
         lines.append(f"<b>{i:02d}.</b> <a href=\"{t_link}\">{t_name}</a> — <i>{by}</i> (<code>{dur}</code>)")
 
     if total > 12:
-        lines.append(f"<i>... and {total - 12} more vibe tracks ready!</i>")
+        lines.append(f"<i>... and {total - 12} more {engine_label} tracks ready!</i>")
 
     preview_body = "\n".join(lines)
     card_text = (
-        f"📻 <b>Aᴜᴛᴏᴘʟᴀʏ Vɪʙᴇ Pʀᴇᴠɪᴇᴡ Rᴇᴀᴅʏ!</b>\n\n"
+        f"📻 <b>{engine_label.upper()} Pʀᴇᴠɪᴇᴡ Rᴇᴀᴅʏ!</b>\n\n"
         f"🎵 <b>Sᴇᴇᴅ Sᴏɴɢ / URL:</b> <code>{clean_seed}</code>\n"
+        f"⚙️ <b>Eɴɢɪɴᴇ:</b> <code>{engine_label}</code>\n"
         f"🔗 <b>YᴏᴜTᴜʙᴇ Lɪɴᴋ:</b> <a href=\"{seed_yt}\">{seed_yt}</a>\n"
         f"🔢 <b>Tᴏᴛᴀʟ Tʀᴀᴄᴋs Fᴏᴜɴᴅ:</b> <code>{total} Tracks</code>\n"
         f"⏱️ <b>Rᴇsᴏʟᴠᴇ Tɪᴍᴇ:</b> <code>{preview.get('elapsed_sec', 0.0)}s</code>\n\n"
@@ -1072,10 +1084,16 @@ async def handle_harvest_seed_preview(chat_id: int, user_id: int, seed_input: st
         f"⚡ <i>Cʟɪᴄᴋ ʙᴇʟᴏᴡ ᴛᴏ ᴅᴏᴡɴʟᴏᴀᴅ &amp; ᴄᴀᴄʜᴇ ᴀʟʟ <b>{total}</b> ᴛʀᴀᴄᴋs (480p Vɪᴅᴇᴏ + 48kHz OPUS) ᴄᴏɴᴄᴜʀʀᴇɴᴛʟʏ!</i>"
     )
 
+    other_engine = "vibe" if is_shruti else "autoplay2"
+    other_btn_text = "🔄 Switch to Autoplay 1 (Vibe AI)" if is_shruti else "🔄 Switch to Autoplay 2 (Shruti Mix)"
+
     inline_kb = {
         "inline_keyboard": [
             [
                 {"text": f"🚀 Dᴏᴡɴʟᴏᴀᴅ & Cᴀᴄʜᴇ Aʟʟ ({total} Tʀᴀᴄᴋs)", "callback_data": f"harvest:seed_run:{cache_id}"}
+            ],
+            [
+                {"text": other_btn_text, "callback_data": f"harvest:switch_engine:{other_engine}:{cache_id}"}
             ],
             [
                 {"text": "🌾 Bᴀᴄᴋ ᴛᴏ Hᴀʀᴠᴇsᴛ Mᴇɴᴜ", "callback_data": "harvest_menu"},
@@ -1091,6 +1109,7 @@ async def handle_harvest_seed_preview(chat_id: int, user_id: int, seed_input: st
             await send_msg(chat_id, card_text, reply_markup=inline_kb)
     else:
         await send_msg(chat_id, card_text, reply_markup=inline_kb)
+
 
 
 async def handle_api_endpoints(chat_id: int):
@@ -1285,6 +1304,41 @@ async def handle_endpoint_json_sample(chat_id: int, ep_type: str):
         title = "📻 Aᴜᴛᴏᴘʟᴀʏ Vɪʙᴇ API Rᴇsᴘᴏɴsᴇ JSOɴ (35 Tʀᴀᴄᴋs)"
         get_url = f"{clean_base}/autoplay?url=tum+hi+ho"
         test_cb = "quick_test:autoplay:tum+hi+ho"
+    elif ep_type in ("autoplay2", "shruti"):
+        sample = {
+            "status": "success",
+            "seed": "Jhol",
+            "seed_id": "_Bu9QLDTHX4",
+            "engine": "autoplay2_shruti",
+            "total": 35,
+            "tracks": [
+                {
+                    "index": 1,
+                    "id": "7nkH4yq_76I",
+                    "title": "Blockbuster - Faris Shafi x Umair",
+                    "duration": "03:15",
+                    "duration_sec": 195,
+                    "artist": "Coke Studio Pakistan",
+                    "url": "https://www.youtube.com/watch?v=7nkH4yq_76I",
+                    "thumbnail": "https://img.youtube.com/vi/7nkH4yq_76I/hqdefault.jpg"
+                },
+                {
+                    "index": 2,
+                    "id": "3A3P7a9jH9E",
+                    "title": "Faasle - Aditya Rikhari",
+                    "duration": "03:40",
+                    "duration_sec": 220,
+                    "artist": "Aditya Rikhari",
+                    "url": "https://www.youtube.com/watch?v=3A3P7a9jH9E",
+                    "thumbnail": "https://img.youtube.com/vi/3A3P7a9jH9E/hqdefault.jpg"
+                }
+            ],
+            "elapsed_sec": 2.85,
+            "developer": OWNER_HANDLE,
+        }
+        title = "📻 Aᴜᴛᴏᴘʟᴀʏ 2 (Sʜʀᴜᴛɪ YᴏᴜTᴜʙᴇ Mɪx) API Rᴇsᴘᴏɴsᴇ JSOɴ"
+        get_url = f"{clean_base}/autoplay2?url=Jhol"
+        test_cb = "quick_test:autoplay2:jhol"
     else:
         sample = {
             "status": "success",
@@ -1352,7 +1406,7 @@ async def handle_test_search_menu(chat_id: int):
     inline_kb = {
         "inline_keyboard": [
             [{"text": "🎵 Quick Audio (Fakira)", "callback_data": "quick_test:audio:fakira"}, {"text": "🎬 Quick Video (Fakira)", "callback_data": "quick_test:video:fakira"}],
-            [{"text": "📻 Quick Autoplay (Tum Hi Ho)", "callback_data": "quick_test:autoplay:tum+hi+ho"}],
+            [{"text": "📻 Quick Autoplay 1 (Tum Hi Ho)", "callback_data": "quick_test:autoplay:tum+hi+ho"}, {"text": "📻 Quick Autoplay 2 (Jhol)", "callback_data": "quick_test:autoplay2:jhol"}],
             [{"text": "🔍 Quick Search (Fakira)", "callback_data": "quick_test:search:fakira"}, {"text": "📑 Quick Playlist", "callback_data": "quick_test:playlist:RDIuvVVWOsMBo"}],
         ]
     }
@@ -1375,6 +1429,9 @@ async def execute_api_test(chat_id: int, input_text: str, forced_mode: Optional[
         parsed = urllib.parse.urlparse(input_text)
         if "/playlist" in parsed.path:
             api_label = "Playlist"
+            endpoint_path = f"{parsed.path}?{parsed.query}"
+        elif "/autoplay2" in parsed.path:
+            api_label = "Autoplay 2 (Shruti)"
             endpoint_path = f"{parsed.path}?{parsed.query}"
         elif "/autoplay" in parsed.path:
             api_label = "Autoplay"
@@ -1401,6 +1458,9 @@ async def execute_api_test(chat_id: int, input_text: str, forced_mode: Optional[
             elif forced_mode == "m4a":
                 api_label = "Audio (M4A)"
                 endpoint_path = f"/download?type=audio&format=m4a&url={urllib.parse.quote(input_text, safe='')}"
+            elif forced_mode in ("autoplay2", "shruti"):
+                api_label = "Autoplay 2 (Shruti)"
+                endpoint_path = f"/autoplay2?url={urllib.parse.quote(input_text, safe='')}"
             elif forced_mode == "autoplay":
                 api_label = "Autoplay"
                 endpoint_path = f"/autoplay?url={urllib.parse.quote(input_text, safe='')}"
@@ -1424,6 +1484,9 @@ async def execute_api_test(chat_id: int, input_text: str, forced_mode: Optional[
         elif forced_mode == "playlist":
             api_label = "Playlist"
             endpoint_path = f"/playlist?url={urllib.parse.quote(input_text, safe='')}"
+        elif forced_mode in ("autoplay2", "shruti"):
+            api_label = "Autoplay 2 (Shruti)"
+            endpoint_path = f"/autoplay2?url={urllib.parse.quote(input_text, safe='')}"
         elif forced_mode == "autoplay":
             api_label = "Autoplay"
             endpoint_path = f"/autoplay?url={urllib.parse.quote(input_text, safe='')}"
@@ -1470,7 +1533,8 @@ async def execute_api_test(chat_id: int, input_text: str, forced_mode: Optional[
             await send_msg(chat_id, err_msg)
         return
 
-    if not data or data.get("status") != "success" or not data.get("id"):
+    has_valid_item = bool(data.get("id") or data.get("seed_id") or data.get("playlist_id") or data.get("tracks") or data.get("items"))
+    if not data or data.get("status") != "success" or not has_valid_item:
         err_detail = (data.get("detail") or data.get("error")) if isinstance(data, dict) else "No results found"
         err_msg = f"❌ <b>API Eʀʀᴏʀ:</b> <code>{err_detail}</code>\n\nPʟᴇᴀsᴇ ᴄʜᴇᴄᴋ ʏᴏᴜʀ sᴘᴇʟʟɪɴɢ ᴏʀ ᴛʀʏ ᴀɴᴏᴛʜᴇʀ sᴏɴɢ ɴᴀᴍᴇ."
         if loading_msg_id:
@@ -1526,11 +1590,14 @@ async def execute_api_test(chat_id: int, input_text: str, forced_mode: Optional[
             f"⏱️ <b>Tɪᴍᴇ:</b> <code>{data.get('elapsed_sec', 0.0)}s</code>\n"
             f"👨‍💻 <b>Dᴇᴠᴇʟᴏᴘᴇʀ:</b> <code>{data.get('developer', OWNER_HANDLE)}</code>\n"
         )
-    elif api_label == "Autoplay":
+    elif api_label in ("Autoplay", "Autoplay 2 (Shruti)"):
+        is_shruti = "shruti" in api_label.lower() or "autoplay2" in api_label.lower() or data.get("engine") == "autoplay2_shruti"
+        engine_name = "Autoplay 2 (Shruti YouTube Mix)" if is_shruti else "Autoplay 1 (Vibe AI)"
         card_text = (
-            f"📻 <b>Aᴜᴛᴏᴘʟᴀʏ Vɪʙᴇ Rᴇsᴜʟᴛ: Sᴜᴄᴄᴇss</b>\n\n"
-            f"🎵 <b>Sᴇᴇᴅ Sᴏɴɢ:</b> <code>{data.get('seed', 'Unknown')}</code>\n"
-            f"🔢 <b>Tᴏᴛᴀʟ Vɪʙᴇ Tʀᴀᴄᴋs:</b> <code>{data.get('total', 0)}</code>\n"
+            f"📻 <b>{engine_name.upper()} Rᴇsᴜʟᴛ: Sᴜᴄᴄᴇss</b>\n\n"
+            f"🎵 <b>Sᴇᴇᴅ Sᴏɴɢ:</b> <code>{data.get('seed_title') or data.get('seed', 'Unknown')}</code>\n"
+            f"⚙️ <b>Eɴɢɪɴᴇ:</b> <code>{engine_name}</code>\n"
+            f"🔢 <b>Tᴏᴛᴀʟ Tʀᴀᴄᴋs:</b> <code>{data.get('total', len(data.get('tracks', [])))}</code>\n"
             f"⚡ <b>Sᴘᴇᴇᴅ:</b> <code>{data.get('elapsed_sec', 0.0)}s</code>\n"
             f"👨‍💻 <b>Dᴇᴠᴇʟᴏᴘᴇʀ:</b> <code>{data.get('developer', OWNER_HANDLE)}</code>\n"
         )
@@ -1561,7 +1628,7 @@ async def execute_api_test(chat_id: int, input_text: str, forced_mode: Optional[
         json_display = json_str
 
     # If video ID exists, deliver 16:9 photo card first
-    vid_id = data.get("id")
+    vid_id = data.get("id") or data.get("seed_id")
     if api_label != "Playlist" and vid_id:
         thumb_url = f"https://i.ytimg.com/vi/{vid_id}/maxresdefault.jpg"
         if loading_msg_id:
@@ -1652,7 +1719,8 @@ async def handle_callback_query(cq: dict):
             "video": "🎬 Vɪᴅᴇᴏ (480p)",
             "search": "🔍 Sᴇᴀʀᴄʜ (Fast Meta)",
             "playlist": "📑 Pʟᴀʏʟɪsᴛ (25 Songs)",
-            "autoplay": "📻 Aᴜᴛᴏᴘʟᴀʏ Vɪʙᴇ (35 Songs)"
+            "autoplay": "📻 Aᴜᴛᴏᴘʟᴀʏ 1 Vɪʙᴇ (35 Songs)",
+            "autoplay2": "📻 Aᴜᴛᴏᴘʟᴀʏ 2 Sʜʀᴜᴛɪ Mɪx (35 Songs)"
         }
         await send_msg(
             chat_id,
@@ -1700,13 +1768,26 @@ async def handle_callback_query(cq: dict):
     elif data == "harvest:seed_prompt":
         USER_STATES[user_id] = {"mode": "harvest_seed", "expires_at": time.time() + 600}
         prompt_text = (
-            f"📻 <b>Sᴇᴇᴅ Lɪɴᴋ / Aᴜᴛᴏᴘʟᴀʏ Vɪʙᴇ Pʀᴇ-Cᴀᴄʜᴇʀ</b>\n\n"
+            f"📻 <b>Sᴇᴇᴅ Lɪɴᴋ / Aᴜᴛᴏᴘʟᴀʏ Pʀᴇ-Cᴀᴄʜᴇʀ</b>\n\n"
             f"Sᴇɴᴅ ᴀɴʏ <b>sᴏɴɢ ɴᴀᴍᴇ</b> ᴏʀ <b>YᴏᴜTᴜʙᴇ URL</b>.\n"
-            f"Bᴏᴛ ᴡɪʟʟ ᴇxᴛʀᴀᴄᴛ <b>25–40 ʀᴇʟᴀᴛᴇᴅ ᴠɪʙᴇ ᴛʀᴀᴄᴋs</b> ᴀɴᴅ sʜᴏᴡ ʏᴏᴜ ᴀ ᴘʀᴇᴠɪᴇᴡ ʟɪsᴛ "
-            f"ᴡɪᴛʜ ᴀ <b>[🚀 Dᴏᴡɴʟᴏᴀᴅ &amp; Cᴀᴄʜᴇ Aʟʟ]</b> ʙᴜᴛᴛᴏɴ!\n\n"
+            f"Bᴏᴛ ᴡɪʟʟ ᴇxᴛʀᴀᴄᴛ <b>25–40 ʀᴇʟᴀᴛᴇᴅ ᴛʀᴀᴄᴋs</b> via Autoplay 1 (Vibe AI) or Autoplay 2 (Shruti Mix) "
+            f"ᴀɴᴅ sʜᴏᴡ ʏᴏᴜ ᴀ ᴘʀᴇᴠɪᴇᴡ ʟɪsᴛ ᴡɪᴛʜ ᴀ <b>[🚀 Dᴏᴡɴʟᴏᴀᴅ &amp; Cᴀᴄʜᴇ Aʟʟ]</b> ʙᴜᴛᴛᴏɴ!\n\n"
             f"<i>Example:</i> <code>Jhol</code> or <code>tum hi ho</code> or <code>https://youtube.com/watch?v=...</code>"
         )
         await send_msg(chat_id, prompt_text)
+
+    elif data.startswith("harvest:switch_engine:"):
+        parts = data.split(":")
+        target_engine = parts[2]
+        old_cache_id = parts[3]
+        from harvester import SEED_PREVIEWS
+        p = SEED_PREVIEWS.get(old_cache_id)
+        seed_txt = p.get("seed", "") if p else ""
+        if not seed_txt:
+            await send_msg(chat_id, "⚠️ <i>Preview session expired. Please send the song name or URL again!</i>")
+            return
+        msg_id = msg.get("message_id")
+        await handle_harvest_seed_preview(chat_id, user_id, seed_txt, engine=target_engine, message_id_to_edit=msg_id)
 
     elif data.startswith("harvest:seed_run:"):
         if user_id != OWNER_ID:
@@ -1720,11 +1801,14 @@ async def handle_callback_query(cq: dict):
             return
         seed_name = preview_data["seed"]
         tracks = preview_data["data"].get("tracks", [])
+        engine_used = preview_data.get("engine", "vibe")
+        engine_lbl = preview_data.get("engine_label", "Autoplay")
         started = harvest_manager.start_seed_autoplay(
             seed_query=seed_name,
             tracks=tracks,
             target_count=len(tracks),
             concurrency=3,
+            engine=engine_used,
             notify_callback=lambda txt: send_msg(chat_id, txt)
         )
         if started:
@@ -1732,6 +1816,7 @@ async def handle_callback_query(cq: dict):
                 chat_id,
                 f"🚀 <b>Seed Autoplay Harvest Started!</b>\n"
                 f"🎵 <b>Seed:</b> <code>{seed_name}</code>\n"
+                f"⚙️ <b>Engine:</b> <code>{engine_lbl}</code>\n"
                 f"🔢 <b>Caching:</b> <code>{len(tracks)} Tracks</code> (Video 480p + 48kHz Opus)\n"
                 f"⚡ <b>Slots:</b> 3 Parallel Workers"
             )
@@ -2066,12 +2151,19 @@ async def handle_message(msg: dict):
         else:
             await send_msg(chat_id, "Usage: <code>/playlist &lt;playlist URL&gt;</code>")
 
+    elif text.startswith("/autoplay2"):
+        q = text.split(" ", 1)[1].strip() if " " in text else ""
+        if q:
+            asyncio.create_task(execute_api_test(chat_id, q, forced_mode="autoplay2"))
+        else:
+            await send_msg(chat_id, "Usage: <code>/autoplay2 &lt;song name or URL&gt;</code>\n<i>Fetches official YouTube Mix recommendations via Shruti Autoplay API</i>")
+
     elif text.startswith("/autoplay"):
         q = text.split(" ", 1)[1].strip() if " " in text else ""
         if q:
             asyncio.create_task(execute_api_test(chat_id, q, forced_mode="autoplay"))
         else:
-            await send_msg(chat_id, "Usage: <code>/autoplay &lt;song name or URL&gt;</code>")
+            await send_msg(chat_id, "Usage: <code>/autoplay &lt;song name or URL&gt;</code>\n<i>Fetches 35 smart recommendations via Vibe AI Engine</i>")
 
     else:
         # Check if text is a raw IP address
@@ -2085,6 +2177,14 @@ async def handle_message(msg: dict):
             mode = user_state.get("mode")
             if mode == "harvest_seed":
                 asyncio.create_task(handle_harvest_seed_preview(chat_id, user_id, text))
+                return
+            elif mode in ("autoplay2", "shruti"):
+                USER_STATES.pop(user_id, None)
+                asyncio.create_task(execute_api_test(chat_id, text, forced_mode="autoplay2"))
+                return
+            elif mode == "autoplay":
+                USER_STATES.pop(user_id, None)
+                asyncio.create_task(execute_api_test(chat_id, text, forced_mode="autoplay"))
                 return
         USER_STATES.pop(user_id, None)
         asyncio.create_task(execute_api_test(chat_id, text))
