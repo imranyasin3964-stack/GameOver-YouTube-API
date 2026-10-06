@@ -965,16 +965,34 @@ async def api_harvest_start(
     """Starts background Auto-Harvest engine (default 50 tracks, concurrency 3)"""
     from harvester import harvest_manager
     from telegram_bot import send_msg, OWNER_ID
-    started = harvest_manager.start(
+    res = harvest_manager.start(
         genre=genre,
         target_per_category=target,
         concurrency=concurrency,
         notify_callback=lambda txt: send_msg(OWNER_ID, txt)
     )
     return {
-        "status": "started" if started else "already_running",
+        **res,
         "genre": genre,
         "target_per_category": target,
+        "concurrency": concurrency
+    }
+
+
+@app.get("/harvest/continuous")
+async def api_harvest_continuous(
+    concurrency: int = Query(3, ge=1, le=5)
+):
+    """Starts 24/7 Endless Non-Stop Auto-Harvest across all genres + Shruti Autoplay Radio exploration"""
+    from harvester import harvest_manager
+    from telegram_bot import send_msg, OWNER_ID
+    res = harvest_manager.start_continuous(
+        concurrency=concurrency,
+        notify_callback=lambda txt: send_msg(OWNER_ID, txt)
+    )
+    return {
+        **res,
+        "mode": "24/7 continuous",
         "concurrency": concurrency
     }
 
@@ -988,14 +1006,14 @@ async def api_harvest_seed(
     """Starts Autoplay Vibe harvest for a seed song or YouTube URL (2-in-1 video+opus cache)"""
     from harvester import harvest_manager
     from telegram_bot import send_msg, OWNER_ID
-    started = harvest_manager.start_seed_autoplay(
+    res = harvest_manager.start_seed_autoplay(
         seed_query=url,
         target_count=limit,
         concurrency=concurrency,
         notify_callback=lambda txt: send_msg(OWNER_ID, txt)
     )
     return {
-        "status": "started" if started else "already_running",
+        **res,
         "seed": url,
         "target_count": limit,
         "concurrency": concurrency

@@ -43,6 +43,7 @@ from scraper_engine import (
     parse_duration_to_sec,
     resolve_smart_autoplay,
     resolve_shruti_autoplay,
+    fetch_shruti_autoplay,
 )
 from engine import convert_media_ffmpeg
 
@@ -134,10 +135,12 @@ SEED_PREVIEWS: Dict[str, Dict[str, Any]] = {}
 class HarvestManager:
     def __init__(self):
         self.is_running: bool = False
+        self.continuous_mode: bool = False
+        self.job_queue: List[Dict[str, Any]] = []
         self.task: Optional[asyncio.Task] = None
         self.notify_cb: Optional[Callable[[str], Any]] = None
         self.selected_genre: str = "random"
-        self.active_mode: str = "idle"  # "random", "genre", "seed"
+        self.active_mode: str = "idle"  # "random", "genre", "seed", "continuous"
         self.current_genre: str = ""
         self.current_song: str = ""
         self.total_downloaded: int = 0
@@ -153,6 +156,8 @@ class HarvestManager:
         uptime_sec = int(time.time() - self.start_time) if self.is_running and self.start_time > 0 else 0
         return {
             "is_running": self.is_running,
+            "continuous_mode": self.continuous_mode,
+            "queue_len": len(self.job_queue),
             "concurrency": self.concurrency,
             "active_mode": self.active_mode,
             "selected_genre": self.selected_genre,
@@ -186,17 +191,26 @@ class HarvestManager:
         target_per_category: int = 50,
         concurrency: int = 3,
         notify_callback: Optional[Callable[[str], Any]] = None
-    ) -> bool:
+    ) -> Dict[str, Any]:
+        clean_genre = (genre or "random").lower().strip()
         if self.is_running:
-            return False
+            self.job_queue.append({
+                "type": "genre",
+                "genre": clean_genre,
+                "target_per_category": target_per_category,
+                "concurrency": concurrency,
+                "notify_callback": notify_callback
+            })
+            return {"status": "queued", "position": len(self.job_queue)}
+
         self.is_running = True
+        self.continuous_mode = False
         self.notify_cb = notify_callback
         self.start_time = time.time()
         self.total_downloaded = 0
         self.total_skipped = 0
         self.total_failed = 0
         self.concurrency = max(1, min(5, concurrency))
-        clean_genre = (genre or "random").lower().strip()
         self.selected_genre = clean_genre
         if clean_genre in ("random", "all", "mixed"):
             self.active_mode = "random"
@@ -207,7 +221,7 @@ class HarvestManager:
             self.last_status_msg = f"{g_lbl} ({self.concurrency} Slots)"
 
         self.task = asyncio.create_task(self._run_loop(clean_genre, target_per_category))
-        return True
+        return {"status": "started", "position": 0}
 
     def start_seed_autoplay(
         self,
@@ -217,10 +231,21 @@ class HarvestManager:
         concurrency: int = 3,
         engine: str = "vibe",
         notify_callback: Optional[Callable[[str], Any]] = None
-    ) -> bool:
+    ) -> Dict[str, Any]:
         if self.is_running:
-            return False
+            self.job_queue.append({
+                "type": "seed",
+                "seed_query": seed_query,
+                "tracks": tracks,
+                "target_count": target_count,
+                "concurrency": concurrency,
+                "engine": engine,
+                "notify_callback": notify_callback
+            })
+            return {"status": "queued", "position": len(self.job_queue)}
+
         self.is_running = True
+        self.continuous_mode = False
         self.notify_cb = notify_callback
         self.start_time = time.time()
         self.total_downloaded = 0
@@ -233,9 +258,38 @@ class HarvestManager:
         self.current_genre = f"📻 {engine_tag}: {seed_query[:25]}"
         self.last_status_msg = f"{engine_tag} ({self.concurrency} Slots)"
         self.task = asyncio.create_task(self._run_seed_loop(seed_query, tracks, target_count, engine=engine))
-        return True
+        return {"status": "started", "position": 0}
+
+    def start_continuous(
+        self,
+        concurrency: int = 3,
+        notify_callback: Optional[Callable[[str], Any]] = None
+    ) -> Dict[str, Any]:
+        """Starts 24/7 Endless Non-Stop Harvest loop across all genres + Shruti Autoplay Radio"""
+        if self.is_running and self.continuous_mode:
+            return {"status": "already_running", "position": 0}
+
+        if self.is_running:
+            self.stop()
+
+        self.is_running = True
+        self.continuous_mode = True
+        self.notify_cb = notify_callback
+        self.start_time = time.time()
+        self.total_downloaded = 0
+        self.total_skipped = 0
+        self.total_failed = 0
+        self.concurrency = max(1, min(5, concurrency))
+        self.active_mode = "continuous"
+        self.selected_genre = "24/7 Endless"
+        self.current_genre = "♾️ 24/7 Endless All Genres + Autoplay Mix"
+        self.last_status_msg = f"♾️ 24/7 Endless ({self.concurrency} Slots)"
+        self.task = asyncio.create_task(self._run_continuous_loop())
+        return {"status": "started", "position": 0}
 
     def stop(self) -> bool:
+        self.continuous_mode = False
+        self.job_queue.clear()
         if not self.is_running:
             return False
         self.is_running = False
@@ -655,11 +709,19 @@ class HarvestManager:
             f"❌ <b>Total Failed:</b> <code>{self.total_failed}</code>\n"
             f"💾 <b>Final Disk Free:</b> <code>{disk['free_gb']} GB</code> / <code>{disk['total_gb']} GB</code>"
         )
-        self.is_running = False
-        self.active_mode = "idle"
-        self.last_status_msg = "Completed"
-        logger.info("[Harvester] Loop completed.")
+        logger.info("[Harvester] Batch completed.")
         await self._send_notify(summary_text)
+
+        # Process next queued job if waiting
+        if self.job_queue and self.is_running:
+            next_job = self.job_queue.pop(0)
+            await self._run_queued_job(next_job)
+            return
+
+        if not self.continuous_mode:
+            self.is_running = False
+            self.active_mode = "idle"
+            self.last_status_msg = "Completed"
 
     async def _run_seed_loop(
         self,
@@ -686,12 +748,20 @@ class HarvestManager:
                 err_msg = f"❌ <b>Failed to resolve {engine_label} tracks:</b> <code>{e}</code>"
                 logger.error(err_msg)
                 await self._send_notify(err_msg)
+                if self.job_queue:
+                    next_job = self.job_queue.pop(0)
+                    await self._run_queued_job(next_job)
+                    return
                 self.is_running = False
                 self.active_mode = "idle"
                 return
 
         if not tracks:
             await self._send_notify(f"❌ <b>No related tracks found via {engine_label} for:</b> <code>{seed_query}</code>")
+            if self.job_queue:
+                next_job = self.job_queue.pop(0)
+                await self._run_queued_job(next_job)
+                return
             self.is_running = False
             self.active_mode = "idle"
             return
@@ -730,10 +800,171 @@ class HarvestManager:
             f"❌ <b>Total Failed:</b> <code>{self.total_failed}</code>\n"
             f"💾 <b>Final Disk Free:</b> <code>{disk['free_gb']} GB</code> / <code>{disk['total_gb']} GB</code>"
         )
+        logger.info(f"[Harvester] Seed {engine_label} loop completed.")
+        await self._send_notify(summary_text)
+
+        # Process next queued job if waiting
+        if self.job_queue and self.is_running:
+            next_job = self.job_queue.pop(0)
+            await self._run_queued_job(next_job)
+            return
+
+        if not self.continuous_mode:
+            self.is_running = False
+            self.active_mode = "idle"
+            self.last_status_msg = "Completed"
+
+    async def _run_queued_job(self, job: Dict[str, Any]):
+        """Runs the next job queued by the user seamlessly"""
+        if not self.is_running:
+            return
+        j_type = job.get("type")
+        rem = len(self.job_queue)
+        if j_type == "seed":
+            s_name = job["seed_query"]
+            eng = job.get("engine", "vibe")
+            eng_lbl = "Autoplay 2 (Shruti)" if eng in ("shruti", "autoplay2", "2") else "Autoplay 1 (Vibe)"
+            await self._send_notify(
+                f"🚀 <b>Starting Queued Job ({rem} remaining in queue):</b>\n"
+                f"📻 <b>Seed:</b> <code>{s_name}</code> ({eng_lbl})\n"
+                f"⚡ <b>Workers:</b> <code>{self.concurrency} Slots</code>"
+            )
+            self.selected_genre = f"seed:{s_name}"
+            self.active_mode = "seed"
+            await self._run_seed_loop(
+                seed_query=s_name,
+                tracks=job.get("tracks"),
+                target_count=job.get("target_count", 35),
+                engine=eng
+            )
+        elif j_type == "genre":
+            g = job["genre"]
+            lbl = "Random Mixed" if g in ("random", "all", "mixed") else HARVEST_GENRES.get(g, {}).get("label", g.title())
+            await self._send_notify(
+                f"🚀 <b>Starting Queued Job ({rem} remaining in queue):</b>\n"
+                f"📂 <b>Genre:</b> <code>{lbl}</code>\n"
+                f"⚡ <b>Workers:</b> <code>{self.concurrency} Slots</code>"
+            )
+            self.selected_genre = g
+            self.active_mode = "random" if g in ("random", "all", "mixed") else "genre"
+            await self._run_loop(selected_genre=g, target_per_category=job.get("target_per_category", 50))
+
+    async def _run_continuous_loop(self):
+        """
+        ♾️ 24/7 Endless Continuous Auto-Harvest Loop:
+        Runs non-stop all night across all genres + dynamically explores Shruti Autoplay Radio recommendations.
+        Never stops automatically; processes queued jobs first, then keeps expanding library endlessly.
+        """
+        logger.info("[Harvester] Starting 24/7 Continuous Infinite Auto-Harvest!")
+        await self._send_notify(
+            "♾️ <b>24/7 Endless Auto-Harvest Started!</b>\n\n"
+            f"⚡ <b>Parallel Slots:</b> <code>{self.concurrency} Concurrent Slots Active</code>\n"
+            f"💽 <b>Storage Capacity:</b> <code>8.7 TB Public Bucket Available</code>\n"
+            "🔄 <b>Strategy:</b> Round-Robin across Pakistani, Bollywood, Arabic, Russian/Phonk, Folk, Hollywood\n"
+            "📻 <b>Deep Expansion:</b> Auto-expands via Shruti Autoplay YouTube Radio Mix!\n"
+            "🌙 <i>Will run all night continuously without stopping until you click Stop!</i>"
+        )
+
+        genre_keys = list(HARVEST_GENRES.keys())
+        cycle = 0
+
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        async with aiohttp.ClientSession(headers=headers) as session:
+            sem = asyncio.Semaphore(self.concurrency)
+
+            while self.is_running and self.continuous_mode:
+                # 1. First priority: Check if user queued any specific seed or genre jobs
+                if self.job_queue:
+                    next_job = self.job_queue.pop(0)
+                    await self._run_queued_job(next_job)
+                    continue
+
+                cycle += 1
+                current_genre_key = genre_keys[(cycle - 1) % len(genre_keys)]
+                g_info = HARVEST_GENRES[current_genre_key]
+                self.current_genre = f"♾️ {g_info['label']}"
+                logger.info(f"[Harvester 24/7] Cycle {cycle}: Harvesting {g_info['label']} + Autoplay exploration")
+
+                # Fetch candidates for this genre
+                pool: List[Dict[str, Any]] = []
+                seen_vids = set()
+
+                for q in g_info["queries"]:
+                    if not self.is_running or not self.continuous_mode:
+                        break
+                    cands = await self._fetch_candidates_for_query(session, q, max_items=20)
+                    for c in cands:
+                        if c["id"] not in seen_vids:
+                            seen_vids.add(c["id"])
+                            pool.append(c)
+                    await asyncio.sleep(0.2)
+
+                # Explore Shruti Autoplay recommendations for top candidates in this batch
+                if pool and self.is_running and self.continuous_mode:
+                    seed_picks = [p["id"] for p in pool[:2]]
+                    for s_vid in seed_picks:
+                        if not self.is_running or not self.continuous_mode:
+                            break
+                        try:
+                            shruti_tracks = await fetch_shruti_autoplay(session, s_vid, max_tracks=15)
+                            for st in shruti_tracks:
+                                st_id = st.get("video_id")
+                                if st_id and st_id not in seen_vids:
+                                    seen_vids.add(st_id)
+                                    pool.append({
+                                        "id": st_id,
+                                        "title": st.get("title", ""),
+                                        "uploader": st.get("artist", "YouTube"),
+                                        "duration": st.get("duration", "03:30"),
+                                        "duration_sec": st.get("duration_sec", 210),
+                                        "thumbnail": st.get("thumbnail", f"https://img.youtube.com/vi/{st_id}/hqdefault.jpg"),
+                                    })
+                        except Exception as ex:
+                            logger.debug(f"[Harvester Continuous] Shruti exploration note: {ex}")
+
+                # Enqueue and download
+                if pool and self.is_running and self.continuous_mode:
+                    queue = asyncio.Queue()
+                    for item in pool:
+                        await queue.put((g_info["label"], item))
+
+                    workers = [asyncio.create_task(self._worker(queue, sem)) for _ in range(self.concurrency)]
+                    await queue.join()
+
+                    for w in workers:
+                        if not w.done():
+                            w.cancel()
+                    await asyncio.gather(*workers, return_exceptions=True)
+
+                disk = self.get_disk_stats()
+                if disk["free_gb"] < 3.0:
+                    warn_msg = f"⚠️ <b>Storage Warning:</b> Only {disk['free_gb']} GB free remaining in bucket! Stopping 24/7 Harvest."
+                    logger.warning(warn_msg)
+                    await self._send_notify(warn_msg)
+                    break
+
+                await self._send_notify(
+                    f"📊 <b>24/7 Endless Harvest Cycle #{cycle} Complete!</b>\n\n"
+                    f"📂 <b>Category:</b> {g_info['label']}\n"
+                    f"📥 <b>Total Downloaded:</b> <code>{self.total_downloaded}</code> (Skipped: {self.total_skipped})\n"
+                    f"💾 <b>NVMe Free:</b> <code>{disk['free_gb']} GB</code> / <code>{disk['total_gb']} GB</code>\n"
+                    f"🔄 <i>Automatically advancing to next genre...</i>"
+                )
+                await asyncio.sleep(2.0)
+
+        disk = self.get_disk_stats()
+        summary_text = (
+            f"🎉 <b>24/7 Endless Auto-Harvest Stopped!</b>\n\n"
+            f"📥 <b>Total Downloaded:</b> <code>{self.total_downloaded}</code>\n"
+            f"⏭️ <b>Total Skipped:</b> <code>{self.total_skipped}</code>\n"
+            f"❌ <b>Total Failed:</b> <code>{self.total_failed}</code>\n"
+            f"💾 <b>Final Disk Free:</b> <code>{disk['free_gb']} GB</code> / <code>{disk['total_gb']} GB</code>"
+        )
         self.is_running = False
+        self.continuous_mode = False
         self.active_mode = "idle"
         self.last_status_msg = "Completed"
-        logger.info(f"[Harvester] Seed {engine_label} loop completed.")
+        logger.info("[Harvester] 24/7 continuous loop finished.")
         await self._send_notify(summary_text)
 
 

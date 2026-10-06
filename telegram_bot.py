@@ -950,38 +950,51 @@ async def handle_harvest_menu(chat_id: int, message_id_to_edit: Optional[int] = 
 
     mode_label = st.get("selected_genre", "None").title()
     if st["is_running"]:
-        if st["active_mode"] == "random":
+        if st.get("continuous_mode"):
+            mode_label = "♾️ 24/7 Endless Non-Stop (All Genres + Autoplay Mix)"
+        elif st["active_mode"] == "random":
             mode_label = "🎲 Random Mixed (All Genres Interleaved)"
         elif st["active_mode"] == "seed":
             mode_label = f"📻 Autoplay: {st.get('selected_genre', '').replace('seed:', '')[:25]}"
         elif st["active_mode"] == "genre":
             mode_label = HARVEST_GENRES.get(st.get("selected_genre"), {}).get("label", mode_label)
 
+    q_len = st.get("queue_len", 0)
+    queue_line = f"• <b>Qᴜᴇᴜᴇᴅ Bᴀᴛᴄʜᴇs:</b> <code>{q_len} waiting</code>\n" if q_len > 0 else ""
+
     text = (
         f"🌾 <b>Aᴜᴛᴏ-Hᴀʀᴠᴇsᴛ &amp; Pʀᴇ-Cᴀᴄʜᴇ Eɴɢɪɴᴇ</b>\n\n"
         f"• <b>Sᴛᴀᴛᴜs:</b> <b>{running_icon}</b>\n"
         f"• <b>Mᴏᴅᴇ:</b> <code>{mode_label}</code>\n"
+        f"{queue_line}"
         f"• <b>Pᴀʀᴀʟʟᴇʟ Sʟᴏᴛs:</b> <code>{st['concurrency']} Concurrent Workers</code>\n"
         f"• <b>Cᴜʀʀᴇɴᴛ Sᴏɴɢ:</b> <code>{st['current_song'][:35]}</code>\n\n"
         f"📊 <b>Pʀᴏɢʀᴇss:</b>\n"
         f"• <b>Dᴏᴡɴʟᴏᴀᴅᴇᴅ (2-in-1):</b> <code>{st['total_downloaded']}</code>\n"
         f"• <b>Aʟʀᴇᴀᴅʏ Cᴀᴄʜᴇᴅ (Sᴋɪᴘᴘᴇᴅ):</b> <code>{st['total_skipped']}</code>\n"
         f"• <b>Fᴀɪʟᴇᴅ:</b> <code>{st['total_failed']}</code>\n\n"
-        f"💾 <b>Lɪᴠᴇ NVMe Sᴛᴏʀᴀɢᴇ:</b>\n"
-        f"• <b>Fʀᴇᴇ Sᴘᴀᴄᴇ:</b> <code>{st['disk_free_gb']} GB</code>\n"
+        f"💾 <b>Lɪᴠᴇ NVMe / Bᴜᴄᴋᴇᴛ Sᴛᴏʀᴀɢᴇ:</b>\n"
+        f"• <b>Fʀᴇᴇ Sᴘᴀᴄᴇ:</b> <code>{st['disk_free_gb']} GB</code> (8.7 TB Bucket Available)\n"
         f"• <b>Usᴇᴅ Sᴘᴀᴄᴇ:</b> <code>{st['disk_used_gb']} GB</code> / <code>{st['disk_total_gb']} GB</code>\n\n"
-        f"🎯 <b>Sᴇʟᴇᴄᴛ ᴀ Cᴀᴛᴇɢᴏʀʏ ʙᴇʟᴏᴡ ᴛᴏ Hᴀʀᴠᴇsᴛ:</b>"
+        f"🎯 <b>Sᴇʟᴇᴄᴛ ᴀ Cᴀᴛᴇɢᴏʀʏ ᴏʀ Mᴏᴅᴇ ʙᴇʟᴏᴡ:</b>"
     )
 
     buttons = []
     if st["is_running"]:
         buttons.append([{"text": "⏸️ Sᴛᴏᴘ Aᴜᴛᴏ-Hᴀʀᴠᴇsᴛ", "callback_data": "harvest:stop"}])
         buttons.append([
+            {"text": "➕ Queue Seed Song", "callback_data": "harvest:seed_prompt"},
+            {"text": "➕ Queue Mixed Genre", "callback_data": "harvest:genre:random"}
+        ])
+        buttons.append([
             {"text": "🔄 Rᴇғʀᴇsʜ Sᴛᴀᴛᴜs", "callback_data": "harvest:refresh"},
             {"text": "📊 Gᴇɴᴇʀᴀʟ Sᴛᴀᴛs", "callback_data": "stats_menu"}
         ])
     else:
         # Category selection buttons
+        buttons.append([
+            {"text": "♾️ 24/7 Endless Auto-Harvest (All Night Non-Stop)", "callback_data": "harvest:continuous"}
+        ])
         buttons.append([
             {"text": "🎲 Random Mixed (All Genres Interleaved)", "callback_data": "harvest:genre:random"}
         ])
@@ -1746,27 +1759,54 @@ async def handle_callback_query(cq: dict):
     elif data == "harvest_menu":
         await handle_harvest_menu(chat_id, message_id_to_edit=msg.get("message_id"))
 
+    elif data == "harvest:continuous":
+        if user_id != OWNER_ID:
+            await send_msg(chat_id, "⚠️ Oɴʟʏ ᴛʜᴇ Oᴡɴᴇʀ ᴄᴀɴ sᴛᴀʀᴛ Aᴜᴛᴏ-Hᴀʀᴠᴇsᴛ.")
+            return
+        from harvester import harvest_manager
+        res = harvest_manager.start_continuous(
+            concurrency=3,
+            notify_callback=lambda txt: send_msg(chat_id, txt)
+        )
+        if res.get("status") == "started":
+            await send_msg(
+                chat_id,
+                "♾️ <b>24/7 Endless Auto-Harvest Started!</b>\n\n"
+                "⚡ <b>Engine:</b> 3 Parallel Slots Active\n"
+                "🔄 <b>Strategy:</b> Round-Robin All Genres + Shruti Radio Mix\n"
+                "💾 <b>Bucket Capacity:</b> 8.7 TB Available\n"
+                "🌙 <i>Will run all night continuously without stopping!</i>"
+            )
+        elif res.get("status") == "already_running":
+            await send_msg(chat_id, "ℹ️ <b>24/7 Endless Auto-Harvest is already running!</b>")
+        await handle_harvest_menu(chat_id, message_id_to_edit=msg.get("message_id"))
+
     elif data.startswith("harvest:genre:"):
         if user_id != OWNER_ID:
             await send_msg(chat_id, "⚠️ Oɴʟʏ ᴛʜᴇ Oᴡɴᴇʀ ᴄᴀɴ sᴛᴀʀᴛ Aᴜᴛᴏ-Hᴀʀᴠᴇsᴛ.")
             return
         genre_key = data.split(":", 2)[2]
         from harvester import harvest_manager, HARVEST_GENRES
-        started = harvest_manager.start(
+        res = harvest_manager.start(
             genre=genre_key,
             target_per_category=50,
             concurrency=3,
             notify_callback=lambda txt: send_msg(chat_id, txt)
         )
-        if started:
-            lbl = "🎲 Random Mixed (All Genres Interleaved)" if genre_key in ("random", "all", "mixed") else HARVEST_GENRES.get(genre_key, {}).get("label", genre_key.title())
-            await send_msg(chat_id, f"🚀 <b>Auto-Harvest Started!</b>\n📂 <b>Mode:</b> {lbl}\n⚡ <b>Engine:</b> 3 Parallel Slots Active")
+        lbl = "🎲 Random Mixed (All Genres Interleaved)" if genre_key in ("random", "all", "mixed") else HARVEST_GENRES.get(genre_key, {}).get("label", genre_key.title())
+        if res.get("status") == "queued":
+            await send_msg(
+                chat_id,
+                f"📥 <b>Added to Harvest Queue!</b>\n"
+                f"📂 <b>Mode:</b> {lbl}\n"
+                f"🔢 <b>Queue Position:</b> #{res.get('position', 1)}"
+            )
         else:
-            await send_msg(chat_id, "ℹ️ <b>Auto-Harvest is already running a job! Stop it first if you wish to change categories.</b>")
+            await send_msg(chat_id, f"🚀 <b>Auto-Harvest Started!</b>\n📂 <b>Mode:</b> {lbl}\n⚡ <b>Engine:</b> 3 Parallel Slots Active")
         await handle_harvest_menu(chat_id, message_id_to_edit=msg.get("message_id"))
 
     elif data == "harvest:seed_prompt":
-        USER_STATES[user_id] = {"mode": "harvest_seed", "expires_at": time.time() + 600}
+        USER_STATES[user_id] = {"mode": "harvest_seed", "expires_at": time.time() + 300}
         prompt_text = (
             f"📻 <b>Sᴇᴇᴅ Lɪɴᴋ / Aᴜᴛᴏᴘʟᴀʏ Pʀᴇ-Cᴀᴄʜᴇʀ</b>\n\n"
             f"Sᴇɴᴅ ᴀɴʏ <b>sᴏɴɢ ɴᴀᴍᴇ</b> ᴏʀ <b>YᴏᴜTᴜʙᴇ URL</b>.\n"
@@ -1803,7 +1843,7 @@ async def handle_callback_query(cq: dict):
         tracks = preview_data["data"].get("tracks", [])
         engine_used = preview_data.get("engine", "vibe")
         engine_lbl = preview_data.get("engine_label", "Autoplay")
-        started = harvest_manager.start_seed_autoplay(
+        res = harvest_manager.start_seed_autoplay(
             seed_query=seed_name,
             tracks=tracks,
             target_count=len(tracks),
@@ -1811,7 +1851,15 @@ async def handle_callback_query(cq: dict):
             engine=engine_used,
             notify_callback=lambda txt: send_msg(chat_id, txt)
         )
-        if started:
+        if res.get("status") == "queued":
+            await send_msg(
+                chat_id,
+                f"📥 <b>Added Seed Autoplay to Queue!</b>\n"
+                f"🎵 <b>Seed:</b> <code>{seed_name}</code>\n"
+                f"⚙️ <b>Engine:</b> <code>{engine_lbl}</code>\n"
+                f"🔢 <b>Queue Position:</b> #{res.get('position', 1)}"
+            )
+        else:
             await send_msg(
                 chat_id,
                 f"🚀 <b>Seed Autoplay Harvest Started!</b>\n"
@@ -1820,24 +1868,22 @@ async def handle_callback_query(cq: dict):
                 f"🔢 <b>Caching:</b> <code>{len(tracks)} Tracks</code> (Video 480p + 48kHz Opus)\n"
                 f"⚡ <b>Slots:</b> 3 Parallel Workers"
             )
-        else:
-            await send_msg(chat_id, "ℹ️ <b>Harvester is already running! Stop the current job first.</b>")
 
     elif data == "harvest:start":
         if user_id != OWNER_ID:
             await send_msg(chat_id, "⚠️ Oɴʟʏ ᴛʜᴇ Oᴡɴᴇʀ ᴄᴀɴ sᴛᴀʀᴛ Aᴜᴛᴏ-Hᴀʀᴠᴇsᴛ.")
             return
         from harvester import harvest_manager
-        started = harvest_manager.start(
+        res = harvest_manager.start(
             genre="random",
             target_per_category=50,
             concurrency=3,
             notify_callback=lambda txt: send_msg(chat_id, txt)
         )
-        if started:
-            await send_msg(chat_id, "🚀 <b>Auto-Harvest Started (Random Mixed Mode - 3 Slots)!</b>")
+        if res.get("status") == "queued":
+            await send_msg(chat_id, f"📥 <b>Added Random Mixed Mode to Queue!</b>\n🔢 <b>Queue Position:</b> #{res.get('position', 1)}")
         else:
-            await send_msg(chat_id, "ℹ️ <b>Aᴜᴛᴏ-Hᴀʀᴠᴇsᴛ ɪs ᴀʟʀᴇᴀᴅʏ ʀᴜɴɴɪɴɢ!</b>")
+            await send_msg(chat_id, "🚀 <b>Auto-Harvest Started (Random Mixed Mode - 3 Slots)!</b>")
         await handle_harvest_menu(chat_id, message_id_to_edit=msg.get("message_id"))
 
     elif data == "harvest:stop":
@@ -1991,13 +2037,27 @@ async def handle_message(msg: dict):
                 harvest_manager.stop()
                 await send_msg(chat_id, "⏸️ <b>Aᴜᴛᴏ-Hᴀʀᴠᴇsᴛ Sᴛᴏᴘᴘᴇᴅ!</b>")
                 await handle_harvest_menu(chat_id)
+        elif sub_low in ("24/7", "continuous", "endless", "infinite"):
+            if user_id != OWNER_ID:
+                await send_msg(chat_id, "⚠️ Oɴʟʏ ᴛʜᴇ Oᴡɴᴇʀ ᴄᴀɴ sᴛᴀʀᴛ Aᴜᴛᴏ-Hᴀʀᴠᴇsᴛ.")
+            else:
+                from harvester import harvest_manager
+                res = harvest_manager.start_continuous(concurrency=3, notify_callback=lambda txt: send_msg(chat_id, txt))
+                if res.get("status") == "started":
+                    await send_msg(chat_id, "♾️ <b>24/7 Endless Auto-Harvest Started (All Night Non-Stop)!</b>")
+                else:
+                    await send_msg(chat_id, "ℹ️ <b>24/7 Endless Auto-Harvest is already running!</b>")
+                await handle_harvest_menu(chat_id)
         elif sub_low in ("random", "all", "mixed"):
             if user_id != OWNER_ID:
                 await send_msg(chat_id, "⚠️ Oɴʟʏ ᴛʜᴇ Oᴡɴᴇʀ ᴄᴀɴ sᴛᴀʀᴛ Aᴜᴛᴏ-Hᴀʀᴠᴇsᴛ.")
             else:
                 from harvester import harvest_manager
-                harvest_manager.start(genre="random", concurrency=3, notify_callback=lambda txt: send_msg(chat_id, txt))
-                await send_msg(chat_id, "🚀 <b>Auto-Harvest Started (Random Mixed Mode - 3 Slots)!</b>")
+                res = harvest_manager.start(genre="random", concurrency=3, notify_callback=lambda txt: send_msg(chat_id, txt))
+                if res.get("status") == "queued":
+                    await send_msg(chat_id, f"📥 <b>Added Random Mixed Mode to Queue (Position #{res.get('position', 1)})!</b>")
+                else:
+                    await send_msg(chat_id, "🚀 <b>Auto-Harvest Started (Random Mixed Mode - 3 Slots)!</b>")
                 await handle_harvest_menu(chat_id)
         elif sub_low in ("pakistani", "bollywood", "arabic", "russian", "phonk", "folk", "hollywood"):
             if user_id != OWNER_ID:
@@ -2005,8 +2065,11 @@ async def handle_message(msg: dict):
             else:
                 g_k = "russian" if sub_low == "phonk" else sub_low
                 from harvester import harvest_manager
-                harvest_manager.start(genre=g_k, concurrency=3, notify_callback=lambda txt: send_msg(chat_id, txt))
-                await send_msg(chat_id, f"🚀 <b>Auto-Harvest Started ({g_k.title()} - 3 Slots)!</b>")
+                res = harvest_manager.start(genre=g_k, concurrency=3, notify_callback=lambda txt: send_msg(chat_id, txt))
+                if res.get("status") == "queued":
+                    await send_msg(chat_id, f"📥 <b>Added {g_k.title()} Mode to Queue (Position #{res.get('position', 1)})!</b>")
+                else:
+                    await send_msg(chat_id, f"🚀 <b>Auto-Harvest Started ({g_k.title()} - 3 Slots)!</b>")
                 await handle_harvest_menu(chat_id)
         else:
             asyncio.create_task(handle_harvest_seed_preview(chat_id, user_id, sub_arg))
@@ -2172,21 +2235,21 @@ async def handle_message(msg: dict):
             return
 
         # Fallback: User typed a song name or pasted an API / YouTube URL
-        user_state = USER_STATES.get(user_id)
+        user_state = USER_STATES.pop(user_id, None)
         if user_state and user_state.get("expires_at", 0) > time.time():
             mode = user_state.get("mode")
             if mode == "harvest_seed":
                 asyncio.create_task(handle_harvest_seed_preview(chat_id, user_id, text))
                 return
             elif mode in ("autoplay2", "shruti"):
-                USER_STATES.pop(user_id, None)
                 asyncio.create_task(execute_api_test(chat_id, text, forced_mode="autoplay2"))
                 return
             elif mode == "autoplay":
-                USER_STATES.pop(user_id, None)
                 asyncio.create_task(execute_api_test(chat_id, text, forced_mode="autoplay"))
                 return
-        USER_STATES.pop(user_id, None)
+            elif mode in ("opus", "audio", "mp3", "m4a", "video", "search", "playlist"):
+                asyncio.create_task(execute_api_test(chat_id, text, forced_mode=mode))
+                return
         asyncio.create_task(execute_api_test(chat_id, text))
 
 async def trigger_hf_restart() -> bool:
