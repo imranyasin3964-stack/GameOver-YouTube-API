@@ -874,15 +874,49 @@ async def api_harvest_status():
 
 
 @app.get("/harvest/start")
-async def api_harvest_start(target: int = Query(50, ge=5, le=100)):
-    """Starts background Auto-Harvest engine (default 50 tracks per genre)"""
+async def api_harvest_start(
+    genre: str = Query("random", description="Category: 'random' (mixed interleaved), 'pakistani', 'bollywood', 'arabic', 'russian', 'folk', 'hollywood'"),
+    target: int = Query(50, ge=5, le=100),
+    concurrency: int = Query(3, ge=1, le=5)
+):
+    """Starts background Auto-Harvest engine (default 50 tracks, concurrency 3)"""
     from harvester import harvest_manager
     from telegram_bot import send_msg, OWNER_ID
     started = harvest_manager.start(
+        genre=genre,
         target_per_category=target,
+        concurrency=concurrency,
         notify_callback=lambda txt: send_msg(OWNER_ID, txt)
     )
-    return {"status": "started" if started else "already_running", "target_per_category": target}
+    return {
+        "status": "started" if started else "already_running",
+        "genre": genre,
+        "target_per_category": target,
+        "concurrency": concurrency
+    }
+
+
+@app.get("/harvest/seed")
+async def api_harvest_seed(
+    url: str = Query(..., description="Song name or YouTube URL to harvest 25-40 related vibe tracks for"),
+    limit: int = Query(35, ge=10, le=50),
+    concurrency: int = Query(3, ge=1, le=5)
+):
+    """Starts Autoplay Vibe harvest for a seed song or YouTube URL (2-in-1 video+opus cache)"""
+    from harvester import harvest_manager
+    from telegram_bot import send_msg, OWNER_ID
+    started = harvest_manager.start_seed_autoplay(
+        seed_query=url,
+        target_count=limit,
+        concurrency=concurrency,
+        notify_callback=lambda txt: send_msg(OWNER_ID, txt)
+    )
+    return {
+        "status": "started" if started else "already_running",
+        "seed": url,
+        "target_count": limit,
+        "concurrency": concurrency
+    }
 
 
 @app.get("/harvest/stop")

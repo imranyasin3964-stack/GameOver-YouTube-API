@@ -944,15 +944,24 @@ async def handle_clear_old_logs(chat_id: int):
 
 
 async def handle_harvest_menu(chat_id: int, message_id_to_edit: Optional[int] = None):
-    from harvester import harvest_manager
+    from harvester import harvest_manager, HARVEST_GENRES
     st = harvest_manager.get_status()
     running_icon = "🟢 RUNNING" if st["is_running"] else "🔴 STOPPED"
+
+    mode_label = st.get("selected_genre", "None").title()
+    if st["is_running"]:
+        if st["active_mode"] == "random":
+            mode_label = "🎲 Random Mixed (All Genres Interleaved)"
+        elif st["active_mode"] == "seed":
+            mode_label = f"📻 Autoplay: {st.get('selected_genre', '').replace('seed:', '')[:25]}"
+        elif st["active_mode"] == "genre":
+            mode_label = HARVEST_GENRES.get(st.get("selected_genre"), {}).get("label", mode_label)
 
     text = (
         f"🌾 <b>Aᴜᴛᴏ-Hᴀʀᴠᴇsᴛ &amp; Pʀᴇ-Cᴀᴄʜᴇ Eɴɢɪɴᴇ</b>\n\n"
         f"• <b>Sᴛᴀᴛᴜs:</b> <b>{running_icon}</b>\n"
+        f"• <b>Mᴏᴅᴇ:</b> <code>{mode_label}</code>\n"
         f"• <b>Pᴀʀᴀʟʟᴇʟ Sʟᴏᴛs:</b> <code>{st['concurrency']} Concurrent Workers</code>\n"
-        f"• <b>Cᴜʀʀᴇɴᴛ Gᴇɴʀᴇ:</b> <code>{st['current_genre']}</code>\n"
         f"• <b>Cᴜʀʀᴇɴᴛ Sᴏɴɢ:</b> <code>{st['current_song'][:35]}</code>\n\n"
         f"📊 <b>Pʀᴏɢʀᴇss:</b>\n"
         f"• <b>Dᴏᴡɴʟᴏᴀᴅᴇᴅ (2-in-1):</b> <code>{st['total_downloaded']}</code>\n"
@@ -961,25 +970,122 @@ async def handle_harvest_menu(chat_id: int, message_id_to_edit: Optional[int] = 
         f"💾 <b>Lɪᴠᴇ NVMe Sᴛᴏʀᴀɢᴇ:</b>\n"
         f"• <b>Fʀᴇᴇ Sᴘᴀᴄᴇ:</b> <code>{st['disk_free_gb']} GB</code>\n"
         f"• <b>Usᴇᴅ Sᴘᴀᴄᴇ:</b> <code>{st['disk_used_gb']} GB</code> / <code>{st['disk_total_gb']} GB</code>\n\n"
-        f"⚡ <i>Dᴏᴡɴʟᴏᴀᴅs 480p Vɪᴅᴇᴏ + 48kHz OPUS Aᴜᴅɪᴏ ɪɴᴛᴏ ʙᴜᴄᴋᴇᴛ sᴏ ᴛʜᴇʏ ʜɪᴛ ɪɴsᴛᴀɴᴛʟʏ!</i>"
+        f"🎯 <b>Sᴇʟᴇᴄᴛ ᴀ Cᴀᴛᴇɢᴏʀʏ ʙᴇʟᴏᴡ ᴛᴏ Hᴀʀᴠᴇsᴛ:</b>"
     )
 
     buttons = []
-    if not st["is_running"]:
-        buttons.append([{"text": "🚀 Sᴛᴀʀᴛ Aᴜᴛᴏ-Hᴀʀᴠᴇsᴛ (50/Gᴇɴʀᴇ)", "callback_data": "harvest:start"}])
-    else:
+    if st["is_running"]:
         buttons.append([{"text": "⏸️ Sᴛᴏᴘ Aᴜᴛᴏ-Hᴀʀᴠᴇsᴛ", "callback_data": "harvest:stop"}])
-
-    buttons.append([
-        {"text": "🔄 Rᴇғʀᴇsʜ Sᴛᴀᴛᴜs", "callback_data": "harvest:refresh"},
-        {"text": "📊 Gᴇɴᴇʀᴀʟ Sᴛᴀᴛs", "callback_data": "stats_menu"}
-    ])
+        buttons.append([
+            {"text": "🔄 Rᴇғʀᴇsʜ Sᴛᴀᴛᴜs", "callback_data": "harvest:refresh"},
+            {"text": "📊 Gᴇɴᴇʀᴀʟ Sᴛᴀᴛs", "callback_data": "stats_menu"}
+        ])
+    else:
+        # Category selection buttons
+        buttons.append([
+            {"text": "🎲 Random Mixed (All Genres Interleaved)", "callback_data": "harvest:genre:random"}
+        ])
+        buttons.append([
+            {"text": "🇵🇰 Pakistani / Coke Studio", "callback_data": "harvest:genre:pakistani"},
+            {"text": "🇮🇳 Bollywood & Romantic", "callback_data": "harvest:genre:bollywood"}
+        ])
+        buttons.append([
+            {"text": "🇸🇦 Arabic Trending", "callback_data": "harvest:genre:arabic"},
+            {"text": "🇷🇺 Russian / Phonk", "callback_data": "harvest:genre:russian"}
+        ])
+        buttons.append([
+            {"text": "🪕 Folk Traditional", "callback_data": "harvest:genre:folk"},
+            {"text": "🌍 Hollywood / Billboard", "callback_data": "harvest:genre:hollywood"}
+        ])
+        buttons.append([
+            {"text": "📻 Seed Link Vibe (Autoplay 35 Tracks)", "callback_data": "harvest:seed_prompt"}
+        ])
+        buttons.append([
+            {"text": "🔄 Rᴇғʀᴇsʜ Sᴛᴀᴛᴜs", "callback_data": "harvest:refresh"},
+            {"text": "📊 Gᴇɴᴇʀᴀʟ Sᴛᴀᴛs", "callback_data": "stats_menu"}
+        ])
 
     inline_kb = {"inline_keyboard": buttons}
     if message_id_to_edit:
         await edit_msg(chat_id, message_id_to_edit, text, reply_markup=inline_kb)
     else:
         await send_msg(chat_id, text, reply_markup=inline_kb)
+
+async def handle_harvest_seed_preview(chat_id: int, user_id: int, seed_input: str):
+    """
+    Extracts 25–40 related vibe tracks for a song name or YouTube link.
+    Renders an aesthetic preview card with instant [🚀 Download & Cache All] button.
+    """
+    clean_seed = seed_input.strip()
+    loading_id = await send_msg(
+        chat_id,
+        f"🔍 <b>Finding related vibe tracks for:</b>\n<code>{clean_seed}</code>\n<i>Resolving YouTube Autoplay Mix (25–35 tracks)...</i>"
+    )
+
+    from harvester import preview_seed_autoplay
+    try:
+        preview = await preview_seed_autoplay(clean_seed, target_count=35)
+    except Exception as e:
+        err_text = f"❌ <b>Failed to resolve autoplay tracks:</b> <code>{e}</code>"
+        if loading_id:
+            await edit_msg(chat_id, loading_id, err_text)
+        else:
+            await send_msg(chat_id, err_text)
+        return
+
+    tracks = preview.get("tracks", [])
+    if not tracks:
+        err_text = f"❌ <b>No related tracks found for:</b> <code>{clean_seed}</code>"
+        if loading_id:
+            await edit_msg(chat_id, loading_id, err_text)
+        else:
+            await send_msg(chat_id, err_text)
+        return
+
+    cache_id = preview["cache_id"]
+    total = len(tracks)
+
+    # Format attractive preview list (showing first 12 tracks)
+    lines = []
+    for i, t in enumerate(tracks[:12], 1):
+        t_name = t.get("title", "Unknown")[:36]
+        dur = t.get("duration", "03:30")
+        by = t.get("uploader", "YouTube")[:18]
+        lines.append(f"<b>{i:02d}.</b> {t_name} — <i>{by}</i> (<code>{dur}</code>)")
+
+    if total > 12:
+        lines.append(f"<i>... and {total - 12} more vibe tracks ready!</i>")
+
+    preview_body = "\n".join(lines)
+    card_text = (
+        f"📻 <b>Aᴜᴛᴏᴘʟᴀʏ Vɪʙᴇ Pʀᴇᴠɪᴇᴡ Rᴇᴀᴅʏ!</b>\n\n"
+        f"🎵 <b>Sᴇᴇᴅ Sᴏɴɢ / URL:</b> <code>{clean_seed}</code>\n"
+        f"🔢 <b>Tᴏᴛᴀʟ Tʀᴀᴄᴋs Fᴏᴜɴᴅ:</b> <code>{total} Tracks</code>\n"
+        f"⏱️ <b>Rᴇsᴏʟᴠᴇ Tɪᴍᴇ:</b> <code>{preview.get('elapsed_sec', 0.0)}s</code>\n\n"
+        f"📋 <b>Tʀᴀᴄᴋs Lɪsᴛ:</b>\n"
+        f"{preview_body}\n\n"
+        f"⚡ <i>Cʟɪᴄᴋ ʙᴇʟᴏᴡ ᴛᴏ ᴅᴏᴡɴʟᴏᴀᴅ &amp; ᴄᴀᴄʜᴇ ᴀʟʟ <b>{total}</b> ᴛʀᴀᴄᴋs (480p Vɪᴅᴇᴏ + 48kHz OPUS) ᴄᴏɴᴄᴜʀʀᴇɴᴛʟʏ!</i>"
+    )
+
+    inline_kb = {
+        "inline_keyboard": [
+            [
+                {"text": f"🚀 Dᴏᴡɴʟᴏᴀᴅ & Cᴀᴄʜᴇ Aʟʟ ({total} Tʀᴀᴄᴋs)", "callback_data": f"harvest:seed_run:{cache_id}"}
+            ],
+            [
+                {"text": "🌾 Bᴀᴄᴋ ᴛᴏ Hᴀʀᴠᴇsᴛ Mᴇɴᴜ", "callback_data": "harvest_menu"},
+                {"text": "❌ Cᴀɴᴄᴇʟ", "callback_data": "dl_cancel:preview"}
+            ]
+        ]
+    }
+
+    if loading_id:
+        ok = await edit_msg(chat_id, loading_id, card_text, reply_markup=inline_kb)
+        if not ok:
+            await delete_msg(chat_id, loading_id)
+            await send_msg(chat_id, card_text, reply_markup=inline_kb)
+    else:
+        await send_msg(chat_id, card_text, reply_markup=inline_kb)
 
 
 async def handle_api_endpoints(chat_id: int):
@@ -1567,18 +1673,79 @@ async def handle_callback_query(cq: dict):
     elif data == "harvest_menu":
         await handle_harvest_menu(chat_id, message_id_to_edit=msg.get("message_id"))
 
+    elif data.startswith("harvest:genre:"):
+        if user_id != OWNER_ID:
+            await send_msg(chat_id, "⚠️ Oɴʟʏ ᴛʜᴇ Oᴡɴᴇʀ ᴄᴀɴ sᴛᴀʀᴛ Aᴜᴛᴏ-Hᴀʀᴠᴇsᴛ.")
+            return
+        genre_key = data.split(":", 2)[2]
+        from harvester import harvest_manager, HARVEST_GENRES
+        started = harvest_manager.start(
+            genre=genre_key,
+            target_per_category=50,
+            concurrency=3,
+            notify_callback=lambda txt: send_msg(chat_id, txt)
+        )
+        if started:
+            lbl = "🎲 Random Mixed (All Genres Interleaved)" if genre_key in ("random", "all", "mixed") else HARVEST_GENRES.get(genre_key, {}).get("label", genre_key.title())
+            await send_msg(chat_id, f"🚀 <b>Auto-Harvest Started!</b>\n📂 <b>Mode:</b> {lbl}\n⚡ <b>Engine:</b> 3 Parallel Slots Active")
+        else:
+            await send_msg(chat_id, "ℹ️ <b>Auto-Harvest is already running a job! Stop it first if you wish to change categories.</b>")
+        await handle_harvest_menu(chat_id, message_id_to_edit=msg.get("message_id"))
+
+    elif data == "harvest:seed_prompt":
+        USER_STATES[user_id] = {"mode": "harvest_seed", "expires_at": time.time() + 600}
+        prompt_text = (
+            f"📻 <b>Sᴇᴇᴅ Lɪɴᴋ / Aᴜᴛᴏᴘʟᴀʏ Vɪʙᴇ Pʀᴇ-Cᴀᴄʜᴇʀ</b>\n\n"
+            f"Sᴇɴᴅ ᴀɴʏ <b>sᴏɴɢ ɴᴀᴍᴇ</b> ᴏʀ <b>YᴏᴜTᴜʙᴇ URL</b>.\n"
+            f"Bᴏᴛ ᴡɪʟʟ ᴇxᴛʀᴀᴄᴛ <b>25–40 ʀᴇʟᴀᴛᴇᴅ ᴠɪʙᴇ ᴛʀᴀᴄᴋs</b> ᴀɴᴅ sʜᴏᴡ ʏᴏᴜ ᴀ ᴘʀᴇᴠɪᴇᴡ ʟɪsᴛ "
+            f"ᴡɪᴛʜ ᴀ <b>[🚀 Dᴏᴡɴʟᴏᴀᴅ &amp; Cᴀᴄʜᴇ Aʟʟ]</b> ʙᴜᴛᴛᴏɴ!\n\n"
+            f"<i>Example:</i> <code>Jhol</code> or <code>tum hi ho</code> or <code>https://youtube.com/watch?v=...</code>"
+        )
+        await send_msg(chat_id, prompt_text)
+
+    elif data.startswith("harvest:seed_run:"):
+        if user_id != OWNER_ID:
+            await send_msg(chat_id, "⚠️ Oɴʟʏ ᴛʜᴇ Oᴡɴᴇʀ ᴄᴀɴ sᴛᴀʀᴛ Aᴜᴛᴏ-Hᴀʀᴠᴇsᴛ.")
+            return
+        cache_id = data.split(":", 2)[2]
+        from harvester import harvest_manager, SEED_PREVIEWS
+        preview_data = SEED_PREVIEWS.get(cache_id)
+        if not preview_data:
+            await send_msg(chat_id, "⚠️ <i>Preview session expired or not found. Please send the song link again!</i>")
+            return
+        seed_name = preview_data["seed"]
+        tracks = preview_data["data"].get("tracks", [])
+        started = harvest_manager.start_seed_autoplay(
+            seed_query=seed_name,
+            tracks=tracks,
+            target_count=len(tracks),
+            concurrency=3,
+            notify_callback=lambda txt: send_msg(chat_id, txt)
+        )
+        if started:
+            await send_msg(
+                chat_id,
+                f"🚀 <b>Seed Autoplay Harvest Started!</b>\n"
+                f"🎵 <b>Seed:</b> <code>{seed_name}</code>\n"
+                f"🔢 <b>Caching:</b> <code>{len(tracks)} Tracks</code> (Video 480p + 48kHz Opus)\n"
+                f"⚡ <b>Slots:</b> 3 Parallel Workers"
+            )
+        else:
+            await send_msg(chat_id, "ℹ️ <b>Harvester is already running! Stop the current job first.</b>")
+
     elif data == "harvest:start":
         if user_id != OWNER_ID:
             await send_msg(chat_id, "⚠️ Oɴʟʏ ᴛʜᴇ Oᴡɴᴇʀ ᴄᴀɴ sᴛᴀʀᴛ Aᴜᴛᴏ-Hᴀʀᴠᴇsᴛ.")
             return
         from harvester import harvest_manager
         started = harvest_manager.start(
+            genre="random",
             target_per_category=50,
             concurrency=3,
             notify_callback=lambda txt: send_msg(chat_id, txt)
         )
         if started:
-            await send_msg(chat_id, "🚀 <b>Aᴜᴛᴏ-Hᴀʀᴠᴇsᴛ Eɴɢɪɴᴇ Sᴛᴀʀᴛᴇᴅ!</b>\nDownloading 50 curated tracks per genre...")
+            await send_msg(chat_id, "🚀 <b>Auto-Harvest Started (Random Mixed Mode - 3 Slots)!</b>")
         else:
             await send_msg(chat_id, "ℹ️ <b>Aᴜᴛᴏ-Hᴀʀᴠᴇsᴛ ɪs ᴀʟʀᴇᴀᴅʏ ʀᴜɴɴɪɴɢ!</b>")
         await handle_harvest_menu(chat_id, message_id_to_edit=msg.get("message_id"))
@@ -1720,8 +1887,39 @@ async def handle_message(msg: dict):
     elif text == "📊 Sᴛᴀᴛs" or t_upper in ("STATS", "📊 STATS", "/STATS"):
         await handle_stats(chat_id)
 
-    elif text in ("🌾 Aᴜᴛᴏ-Hᴀʀᴠᴇsᴛ", "/harvest", "/autoharvest") or "HARVEST" in t_upper:
+    elif text in ("🌾 Aᴜᴛᴏ-Hᴀʀᴠᴇsᴛ", "/harvest", "/autoharvest") or text == "HARVEST":
         await handle_harvest_menu(chat_id)
+
+    elif text.startswith("/harvest "):
+        sub_arg = text.split(" ", 1)[1].strip()
+        sub_low = sub_arg.lower()
+        if sub_low == "stop":
+            if user_id != OWNER_ID:
+                await send_msg(chat_id, "⚠️ Oɴʟʏ ᴛʜᴇ Oᴡɴᴇʀ ᴄᴀɴ sᴛᴏᴘ Aᴜᴛᴏ-Hᴀʀᴠᴇsᴛ.")
+            else:
+                from harvester import harvest_manager
+                harvest_manager.stop()
+                await send_msg(chat_id, "⏸️ <b>Aᴜᴛᴏ-Hᴀʀᴠᴇsᴛ Sᴛᴏᴘᴘᴇᴅ!</b>")
+                await handle_harvest_menu(chat_id)
+        elif sub_low in ("random", "all", "mixed"):
+            if user_id != OWNER_ID:
+                await send_msg(chat_id, "⚠️ Oɴʟʏ ᴛʜᴇ Oᴡɴᴇʀ ᴄᴀɴ sᴛᴀʀᴛ Aᴜᴛᴏ-Hᴀʀᴠᴇsᴛ.")
+            else:
+                from harvester import harvest_manager
+                harvest_manager.start(genre="random", concurrency=3, notify_callback=lambda txt: send_msg(chat_id, txt))
+                await send_msg(chat_id, "🚀 <b>Auto-Harvest Started (Random Mixed Mode - 3 Slots)!</b>")
+                await handle_harvest_menu(chat_id)
+        elif sub_low in ("pakistani", "bollywood", "arabic", "russian", "phonk", "folk", "hollywood"):
+            if user_id != OWNER_ID:
+                await send_msg(chat_id, "⚠️ Oɴʟʏ ᴛʜᴇ Oᴡɴᴇʀ ᴄᴀɴ sᴛᴀʀᴛ Aᴜᴛᴏ-Hᴀʀᴠᴇsᴛ.")
+            else:
+                g_k = "russian" if sub_low == "phonk" else sub_low
+                from harvester import harvest_manager
+                harvest_manager.start(genre=g_k, concurrency=3, notify_callback=lambda txt: send_msg(chat_id, txt))
+                await send_msg(chat_id, f"🚀 <b>Auto-Harvest Started ({g_k.title()} - 3 Slots)!</b>")
+                await handle_harvest_menu(chat_id)
+        else:
+            asyncio.create_task(handle_harvest_seed_preview(chat_id, user_id, sub_arg))
 
     elif text == "🌐 IPs Lɪsᴛ" or "IPS LIST" in t_upper or t_upper in ("IPS", "IP LIST"):
         await handle_ips_list(chat_id)
@@ -1879,6 +2077,9 @@ async def handle_message(msg: dict):
         # Fallback: User typed a song name or pasted an API / YouTube URL
         user_state = USER_STATES.pop(user_id, None)
         mode = user_state.get("mode") if user_state else None
+        if mode == "harvest_seed":
+            asyncio.create_task(handle_harvest_seed_preview(chat_id, user_id, text))
+            return
         asyncio.create_task(execute_api_test(chat_id, text, forced_mode=mode))
 
 async def trigger_hf_restart() -> bool:
