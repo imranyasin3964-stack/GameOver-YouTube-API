@@ -1044,14 +1044,18 @@ async def handle_harvest_seed_preview(chat_id: int, user_id: int, seed_input: st
 
     cache_id = preview["cache_id"]
     total = len(tracks)
+    seed_id = preview.get("seed_id", "")
+    seed_yt = f"https://www.youtube.com/watch?v={seed_id}" if seed_id else clean_seed
 
-    # Format attractive preview list (showing first 12 tracks)
+    # Format attractive preview list (showing first 12 tracks with clickable links)
     lines = []
     for i, t in enumerate(tracks[:12], 1):
-        t_name = t.get("title", "Unknown")[:36]
+        t_name = t.get("title", "Unknown")[:38]
         dur = t.get("duration", "03:30")
         by = t.get("uploader", "YouTube")[:18]
-        lines.append(f"<b>{i:02d}.</b> {t_name} — <i>{by}</i> (<code>{dur}</code>)")
+        t_id = t.get("id", "")
+        t_link = f"https://www.youtube.com/watch?v={t_id}" if t_id else ""
+        lines.append(f"<b>{i:02d}.</b> <a href=\"{t_link}\">{t_name}</a> — <i>{by}</i> (<code>{dur}</code>)")
 
     if total > 12:
         lines.append(f"<i>... and {total - 12} more vibe tracks ready!</i>")
@@ -1060,9 +1064,10 @@ async def handle_harvest_seed_preview(chat_id: int, user_id: int, seed_input: st
     card_text = (
         f"📻 <b>Aᴜᴛᴏᴘʟᴀʏ Vɪʙᴇ Pʀᴇᴠɪᴇᴡ Rᴇᴀᴅʏ!</b>\n\n"
         f"🎵 <b>Sᴇᴇᴅ Sᴏɴɢ / URL:</b> <code>{clean_seed}</code>\n"
+        f"🔗 <b>YᴏᴜTᴜʙᴇ Lɪɴᴋ:</b> <a href=\"{seed_yt}\">{seed_yt}</a>\n"
         f"🔢 <b>Tᴏᴛᴀʟ Tʀᴀᴄᴋs Fᴏᴜɴᴅ:</b> <code>{total} Tracks</code>\n"
         f"⏱️ <b>Rᴇsᴏʟᴠᴇ Tɪᴍᴇ:</b> <code>{preview.get('elapsed_sec', 0.0)}s</code>\n\n"
-        f"📋 <b>Tʀᴀᴄᴋs Lɪsᴛ:</b>\n"
+        f"📋 <b>Tʀᴀᴄᴋs Lɪsᴛ (1–{min(total, 12)}):</b>\n"
         f"{preview_body}\n\n"
         f"⚡ <i>Cʟɪᴄᴋ ʙᴇʟᴏᴡ ᴛᴏ ᴅᴏᴡɴʟᴏᴀᴅ &amp; ᴄᴀᴄʜᴇ ᴀʟʟ <b>{total}</b> ᴛʀᴀᴄᴋs (480p Vɪᴅᴇᴏ + 48kHz OPUS) ᴄᴏɴᴄᴜʀʀᴇɴᴛʟʏ!</i>"
     )
@@ -2075,12 +2080,14 @@ async def handle_message(msg: dict):
             return
 
         # Fallback: User typed a song name or pasted an API / YouTube URL
-        user_state = USER_STATES.pop(user_id, None)
-        mode = user_state.get("mode") if user_state else None
-        if mode == "harvest_seed":
-            asyncio.create_task(handle_harvest_seed_preview(chat_id, user_id, text))
-            return
-        asyncio.create_task(execute_api_test(chat_id, text, forced_mode=mode))
+        user_state = USER_STATES.get(user_id)
+        if user_state and user_state.get("expires_at", 0) > time.time():
+            mode = user_state.get("mode")
+            if mode == "harvest_seed":
+                asyncio.create_task(handle_harvest_seed_preview(chat_id, user_id, text))
+                return
+        USER_STATES.pop(user_id, None)
+        asyncio.create_task(execute_api_test(chat_id, text))
 
 async def trigger_hf_restart() -> bool:
     """Restarts Hugging Face Space via Hugging Face REST API."""

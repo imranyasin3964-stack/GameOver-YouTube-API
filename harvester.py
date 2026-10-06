@@ -35,7 +35,7 @@ from typing import Dict, Any, List, Optional, Callable, Tuple
 
 import aiohttp
 
-from config import CACHE_DIR, YOUTUBE_API_KEY, RENDER_SEARCH_URL
+from config import CACHE_DIR, YOUTUBE_API_KEY, RENDER_SEARCH_URL, CF_WORKER_URL, BASE_URL
 import controller_db
 from scraper_engine import (
     download_via_loader,
@@ -350,9 +350,9 @@ class HarvestManager:
     async def _harvest_single_track(self, track: Dict[str, Any]) -> bool:
         """
         Downloads 480p Video -> Extracts Studio HD Opus locally in 0.1s!
+        Sends rich real-time live notifications with video link, audio status, and direct stream URLs.
         Saves thumbnails and records metadata in controller database.
-        Returns True if a new song was successfully downloaded & cached.
-        Returns False if already cached (skipped) or failed.
+        Returns True if song is ready/cached, False if failed.
         """
         v_id = track["id"]
         title = track["title"]
@@ -365,17 +365,50 @@ class HarvestManager:
         vid_path = CACHE_DIR / f"video_{clean_id}.mp4"
         opus_path = CACHE_DIR / f"audio_{clean_id}.opus"
 
+        yt_link = f"https://www.youtube.com/watch?v={v_id}"
+        base_clean = (CF_WORKER_URL or BASE_URL).rstrip("/")
+        stream_audio_url = f"{base_clean}/media/audio_{clean_id}.opus"
+        stream_video_url = f"{base_clean}/media/video_{clean_id}.mp4"
+
         # Check if already fully cached on disk
         has_video = vid_path.is_file() and vid_path.stat().st_size > 1024
         has_opus = opus_path.is_file() and opus_path.stat().st_size > 1024
 
         if has_video and has_opus:
             self.total_skipped += 1
-            logger.info(f"[Harvester] Already fully cached: {v_id} ('{title}') - Skipping.")
-            return False
+            logger.info(f"[Harvester] Already fully cached: {v_id} ('{title}') - Skipping download.")
+            disk_now = self.get_disk_stats()
+            skip_msg = (
+                f"⚡ <b>Sᴏɴɢ Aʟʀᴇᴀᴅʏ Cᴀᴄʜᴇᴅ (Iɴsᴛᴀɴᴛ Rᴇᴀᴅʏ)!</b>\n\n"
+                f"🎵 <b>Tɪᴛʟᴇ:</b> <code>{title}</code>\n"
+                f"👤 <b>Aʀᴛɪsᴛ:</b> {uploader}\n"
+                f"⏱️ <b>Dᴜʀᴀᴛɪᴏɴ:</b> <code>{dur_str}</code>\n"
+                f"📂 <b>Gᴇɴʀᴇ:</b> {self.current_genre}\n"
+                f"🔗 <b>YᴏᴜTᴜʙᴇ Lɪɴᴋ:</b> <a href=\"{yt_link}\">{yt_link}</a>\n"
+                f"🎬 <b>Vɪᴅᴇᴏ 480p:</b> <code>video_{clean_id}.mp4</code> (Ready)\n"
+                f"🎙️ <b>Oᴘᴜs 48kHz:</b> <code>audio_{clean_id}.opus</code> (Ready)\n"
+                f"🌐 <b>Aᴜᴅɪᴏ Sᴛʀᴇᴀᴍ URL:</b>\n<code>{stream_audio_url}</code>\n"
+                f"🌐 <b>Vɪᴅᴇᴏ Sᴛʀᴇᴀᴍ URL:</b>\n<code>{stream_video_url}</code>\n"
+                f"💾 <b>NVMe Fʀᴇᴇ:</b> <code>{disk_now['free_gb']} GB</code> / <code>{disk_now['total_gb']} GB</code>\n"
+                f"📊 <b>Pʀᴏɢʀᴇss:</b> Cached: <code>{self.total_downloaded}</code> | Skipped: <code>{self.total_skipped}</code>"
+            )
+            await self._send_notify(skip_msg)
+            return True
 
         self.current_song = title
         logger.info(f"[Harvester] Downloading: {v_id} - '{title}'...")
+
+        # Step 0: Real-time Live Start Alert
+        start_msg = (
+            f"🔄 <b>Cᴀᴄʜɪɴɢ Tʀᴀᴄᴋ...</b>\n\n"
+            f"🎵 <b>Tɪᴛʟᴇ:</b> <code>{title}</code>\n"
+            f"👤 <b>Aʀᴛɪsᴛ:</b> {uploader}\n"
+            f"⏱️ <b>Dᴜʀᴀᴛɪᴏɴ:</b> <code>{dur_str}</code>\n"
+            f"📂 <b>Gᴇɴʀᴇ:</b> {self.current_genre}\n"
+            f"🔗 <b>YᴏᴜTᴜʙᴇ Lɪɴᴋ:</b> <a href=\"{yt_link}\">{yt_link}</a>\n"
+            f"⏳ <i>Dᴏᴡɴʟᴏᴀᴅɪɴɢ 480p Vɪᴅᴇᴏ &amp; Rᴇsᴏʟᴠɪɴɢ 48kHz Oᴘᴜs Aᴜᴅɪᴏ...</i>"
+        )
+        await self._send_notify(start_msg)
 
         # Step 1: Download 480p Video if missing
         if not has_video:
@@ -401,6 +434,13 @@ class HarvestManager:
 
         if not has_opus and not has_video:
             self.total_failed += 1
+            fail_msg = (
+                f"❌ <b>Tʀᴀᴄᴋ Cᴀᴄʜɪɴɢ Fᴀɪʟᴇᴅ</b>\n\n"
+                f"🎵 <b>Tɪᴛʟᴇ:</b> <code>{title}</code>\n"
+                f"🔗 <b>YᴏᴜTᴜʙᴇ Lɪɴᴋ:</b> <a href=\"{yt_link}\">{yt_link}</a>\n"
+                f"⚠️ <i>Unable to resolve media streams from YouTube. Skipping to next track.</i>"
+            )
+            await self._send_notify(fail_msg)
             return False
 
         # Step 4: Cache thumbnail locally
@@ -414,7 +454,7 @@ class HarvestManager:
             duration_sec=dur_sec,
             thumbnail=thumb_url,
             uploader=uploader,
-            youtube_url=f"https://www.youtube.com/watch?v={v_id}",
+            youtube_url=yt_link,
             audio_file=f"audio_{clean_id}.opus" if has_opus else None,
             video_file=f"video_{clean_id}.mp4" if has_video else None,
         )
@@ -422,6 +462,24 @@ class HarvestManager:
 
         self.total_downloaded += 1
         logger.info(f"[Harvester] SUCCESS ✅: {v_id} ('{title}') | Video: {has_video} | Opus: {has_opus}")
+
+        # Step 6: Rich Completion Live Alert for this exact track
+        disk_now = self.get_disk_stats()
+        done_msg = (
+            f"✅ <b>Sᴏɴɢ Cᴀᴄʜᴇᴅ Sᴜᴄᴄᴇssғᴜʟʟʏ (2-ɪɴ-1 Rᴇᴀᴅʏ)!</b>\n\n"
+            f"🎵 <b>Tɪᴛʟᴇ:</b> <code>{title}</code>\n"
+            f"👤 <b>Aʀᴛɪsᴛ:</b> {uploader}\n"
+            f"⏱️ <b>Dᴜʀᴀᴛɪᴏɴ:</b> <code>{dur_str}</code>\n"
+            f"📂 <b>Gᴇɴʀᴇ:</b> {self.current_genre}\n"
+            f"🔗 <b>YᴏᴜTᴜʙᴇ Lɪɴᴋ:</b> <a href=\"{yt_link}\">{yt_link}</a>\n"
+            f"🎬 <b>Vɪᴅᴇᴏ (480p):</b> {'✅ Resolved & Saved' if has_video else '❌ Failed'}\n"
+            f"🎙️ <b>Aᴜᴅɪᴏ (48kHz Opus):</b> {'✅ Resolved & Saved' if has_opus else '❌ Failed'}\n"
+            f"🌐 <b>Aᴜᴅɪᴏ Sᴛʀᴇᴀᴍ URL:</b>\n<code>{stream_audio_url}</code>\n"
+            f"🌐 <b>Vɪᴅᴇᴏ Sᴛʀᴇᴀᴍ URL:</b>\n<code>{stream_video_url}</code>\n"
+            f"💾 <b>NVMe Fʀᴇᴇ:</b> <code>{disk_now['free_gb']} GB</code> / <code>{disk_now['total_gb']} GB</code>\n"
+            f"📊 <b>Pʀᴏɢʀᴇss:</b> Total Cached: <code>{self.total_downloaded}</code> (Skipped: {self.total_skipped})"
+        )
+        await self._send_notify(done_msg)
         return True
 
     async def _worker(self, queue: asyncio.Queue, sem: asyncio.Semaphore):
@@ -459,28 +517,10 @@ class HarvestManager:
                         track = item
 
                     try:
-                        ok = await asyncio.wait_for(self._harvest_single_track(track), timeout=75.0)
+                        await asyncio.wait_for(self._harvest_single_track(track), timeout=75.0)
                     except asyncio.TimeoutError:
                         logger.warning(f"[Harvester Worker] Track {track.get('id')} timed out after 75s. Skipping.")
                         self.total_failed += 1
-                        ok = False
-
-                    if ok:
-                        # Instant Telegram Notification for this exact resolved song!
-                        disk_now = self.get_disk_stats()
-                        dur = track.get("duration", "03:30")
-                        uploader = track.get("uploader", "YouTube")
-                        msg = (
-                            f"✅ <b>Sᴏɴɢ Cᴀᴄʜᴇᴅ (2-ɪɴ-1 Rᴇᴀᴅʏ)!</b>\n\n"
-                            f"🎵 <b>Tɪᴛʟᴇ:</b> <code>{track['title']}</code>\n"
-                            f"👤 <b>Aʀᴛɪsᴛ:</b> {uploader}\n"
-                            f"⏱️ <b>Dᴜʀᴀᴛɪᴏɴ:</b> <code>{dur}</code>\n"
-                            f"📂 <b>Gᴇɴʀᴇ:</b> {self.current_genre}\n"
-                            f"📦 <b>Fᴏʀᴍᴀᴛs:</b> 🎬 480p Video + 🎙️ 48kHz Opus Audio\n"
-                            f"💾 <b>NVMe Fʀᴇᴇ:</b> <code>{disk_now['free_gb']} GB</code> / <code>{disk_now['total_gb']} GB</code>\n"
-                            f"📊 <b>Tᴏᴛᴀʟ Cᴀᴄʜᴇᴅ:</b> <code>{self.total_downloaded}</code> (Skipped: {self.total_skipped})"
-                        )
-                        await self._send_notify(msg)
 
                     await asyncio.sleep(1.0)
             except Exception as e:

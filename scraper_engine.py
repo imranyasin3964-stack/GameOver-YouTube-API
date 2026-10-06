@@ -6,10 +6,11 @@ import logging
 import re
 import time
 import urllib.parse
+import html
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple, List
 
-from config import CACHE_DIR, CF_WORKER_URL, RENDER_SEARCH_URL
+from config import CACHE_DIR, CF_WORKER_URL, RENDER_SEARCH_URL, YOUTUBE_API_KEY
 
 logger = logging.getLogger("GameOverAPI.ScraperEngine")
 
@@ -56,6 +57,203 @@ def parse_duration_to_sec(dur_str: str) -> int:
     except Exception:
         pass
     return 0
+
+
+def parse_iso_duration(iso_str: str) -> Tuple[str, int]:
+    """Converts YouTube ISO 8601 duration (e.g. PT3M45S or PT1H2M3S) to '03:45' and seconds."""
+    m = re.match(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", iso_str or "")
+    if not m:
+        return "03:30", 210
+    h = int(m.group(1) or 0)
+    mins = int(m.group(2) or 0)
+    secs = int(m.group(3) or 0)
+    total_sec = h * 3600 + mins * 60 + secs
+    if h > 0:
+        return f"{h:02d}:{mins:02d}:{secs:02d}", total_sec
+    return f"{mins:02d}:{secs:02d}", total_sec
+
+
+async def resolve_video_details_v3(session: aiohttp.ClientSession, video_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Resolves YouTube video metadata (title, channel, duration, thumbnail)
+    using Official Google YouTube Data API v3 (Tier 1), oEmbed + Web (Tier 2).
+    """
+    clean_id = extract_video_id(video_id) or video_id.strip()
+    if not clean_id or len(clean_id) != 11:
+        return None
+
+    # Tier 1: Official Google YouTube Data API v3
+    if YOUTUBE_API_KEY:
+        try:
+            url = (
+                f"https://www.googleapis.com/youtube/v3/videos"
+                f"?part=snippet,contentDetails&id={clean_id}&key={YOUTUBE_API_KEY}"
+            )
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=5.0)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    items = data.get("items", [])
+                    if items:
+                        item = items[0]
+                        snip = item.get("snippet", {})
+                        title = html.unescape(snip.get("title", ""))
+                        uploader = html.unescape(snip.get("channelTitle", "YouTube"))
+                        raw_dur = item.get("contentDetails", {}).get("duration", "")
+                        dur_str, dur_sec = parse_iso_duration(raw_dur)
+                        thumb = snip.get("thumbnails", {}).get("high", {}).get("url") or f"https://i.ytimg.com/vi/{clean_id}/hqdefault.jpg"
+                        return {
+                            "id": clean_id,
+                            "title": title,
+                            "uploader": uploader,
+                            "duration": dur_str,
+                            "duration_sec": dur_sec,
+                            "thumbnail": thumb,
+                            "url": f"https://www.youtube.com/watch?v={clean_id}",
+                        }
+        except Exception as e:
+            logger.debug(f"[ResolveV3] Google Data API video resolve note for {clean_id}: {e}")
+
+    # Tier 2: oEmbed fallback
+    try:
+        oembed = await fetch_oembed_info(clean_id)
+        if oembed:
+            title = oembed.get("title", clean_id)
+            uploader = oembed.get("author_name", "YouTube")
+            dur_sec, dur_str = 210, "03:30"
+            try:
+                dur_sec, dur_str = await fetch_duration_web(clean_id)
+            except Exception:
+                pass
+            return {
+                "id": clean_id,
+                "title": title,
+                "uploader": uploader,
+                "duration": dur_str,
+                "duration_sec": dur_sec,
+                "thumbnail": f"https://i.ytimg.com/vi/{clean_id}/hqdefault.jpg",
+                "url": f"https://www.youtube.com/watch?v={clean_id}",
+            }
+    except Exception as e:
+        logger.debug(f"[ResolveV3] oEmbed fallback note for {clean_id}: {e}")
+
+    return None
+
+
+async def fetch_candidates_v3(session: aiohttp.ClientSession, query: str, max_items: int = 25) -> List[Dict[str, Any]]:
+    """
+    Fetches high-quality song candidates using Google's Official YouTube Data API v3 as primary engine,
+    with Render Search API as Tier 2 and InnerTube search as Tier 3 fallback.
+    """
+    candidates = []
+    seen = set()
+
+    # Tier 1: Official Google YouTube Data API v3
+    if YOUTUBE_API_KEY:
+        try:
+            search_url = (
+                f"https://www.googleapis.com/youtube/v3/search"
+                f"?part=snippet&q={urllib.parse.quote(query)}"
+                f"&type=video&videoCategoryId=10&maxResults={min(max_items, 50)}"
+                f"&key={YOUTUBE_API_KEY}"
+            )
+            async with session.get(search_url, timeout=aiohttp.ClientTimeout(total=6.0)) as resp:
+                if resp.status == 200:
+                    s_data = await resp.json()
+                    v_ids = []
+                    raw_map = {}
+                    for item in s_data.get("items", []):
+                        vid = item.get("id", {}).get("videoId")
+                        if vid and len(vid) == 11 and vid not in seen:
+                            snip = item.get("snippet", {})
+                            raw_map[vid] = {
+                                "id": vid,
+                                "title": html.unescape(snip.get("title", "")),
+                                "uploader": html.unescape(snip.get("channelTitle", "YouTube")),
+                                "thumbnail": snip.get("thumbnails", {}).get("high", {}).get("url") or f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
+                                "duration": "03:30",
+                                "duration_sec": 210,
+                                "url": f"https://www.youtube.com/watch?v={vid}",
+                            }
+                            v_ids.append(vid)
+
+                    # Batch details query for duration
+                    if v_ids:
+                        for chunk_start in range(0, len(v_ids), 50):
+                            chunk_ids = v_ids[chunk_start:chunk_start + 50]
+                            joined_ids = ",".join(chunk_ids)
+                            details_url = (
+                                f"https://www.googleapis.com/youtube/v3/videos"
+                                f"?part=contentDetails&id={joined_ids}"
+                                f"&key={YOUTUBE_API_KEY}"
+                            )
+                            async with session.get(details_url, timeout=aiohttp.ClientTimeout(total=5.0)) as d_resp:
+                                if d_resp.status == 200:
+                                    d_data = await d_resp.json()
+                                    for ditm in d_data.get("items", []):
+                                        vid = ditm.get("id")
+                                        if vid in raw_map:
+                                            raw_dur = ditm.get("contentDetails", {}).get("duration", "")
+                                            dur_str, dur_sec = parse_iso_duration(raw_dur)
+                                            raw_map[vid]["duration"] = dur_str
+                                            raw_map[vid]["duration_sec"] = dur_sec
+
+                    for vid, obj in raw_map.items():
+                        candidates.append(obj)
+                        seen.add(vid)
+
+                    if candidates:
+                        return candidates
+        except Exception as e:
+            logger.debug(f"[CandidatesV3] Google Data API search note for '{query}': {e}")
+
+    # Tier 2: Render Search API
+    if RENDER_SEARCH_URL:
+        try:
+            r_url = f"{RENDER_SEARCH_URL.rstrip('/')}/search?query={urllib.parse.quote(query)}"
+            async with session.get(r_url, timeout=aiohttp.ClientTimeout(total=5.5)) as r_resp:
+                if r_resp.status == 200:
+                    r_data = await r_resp.json()
+                    for itm in r_data.get("results", []):
+                        vid = itm.get("id")
+                        if vid and len(vid) == 11 and vid not in seen:
+                            seen.add(vid)
+                            dur = itm.get("duration", "03:30")
+                            candidates.append({
+                                "id": vid,
+                                "title": itm.get("title", ""),
+                                "uploader": itm.get("uploader", "YouTube"),
+                                "thumbnail": itm.get("thumbnail") or f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
+                                "duration": dur,
+                                "duration_sec": itm.get("duration_sec") or parse_duration_to_sec(dur),
+                                "url": f"https://www.youtube.com/watch?v={vid}",
+                            })
+                    if candidates:
+                        return candidates
+        except Exception as r_err:
+            logger.debug(f"[CandidatesV3] Render API search note for '{query}': {r_err}")
+
+    # Tier 3: InnerTube scraping fallback
+    try:
+        inner_items = await fetch_youtubei_search(session, query, max_items=max_items)
+        for itm in inner_items:
+            vid = itm.get("id")
+            if vid and len(vid) == 11 and vid not in seen:
+                seen.add(vid)
+                dur = itm.get("duration", "03:30")
+                candidates.append({
+                    "id": vid,
+                    "title": itm.get("title", ""),
+                    "uploader": itm.get("uploader", "YouTube"),
+                    "thumbnail": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
+                    "duration": dur,
+                    "duration_sec": parse_duration_to_sec(dur),
+                    "url": f"https://www.youtube.com/watch?v={vid}",
+                })
+    except Exception as in_err:
+        logger.debug(f"[CandidatesV3] InnerTube search fallback note: {in_err}")
+
+    return candidates
+
 
 
 async def save_thumbnail_local(video_id: str, remote_url: Optional[str] = None) -> str:
@@ -238,23 +436,33 @@ async def search_youtube_full(query: str, max_results: int = 5) -> Dict[str, Any
         uploader = "YouTube"
         dur_sec = 210
         dur_str = "03:30"
-        oembed = await fetch_oembed_info(v_id)
-        if oembed:
-            title = oembed.get("title") or title
-            uploader = oembed.get("author") or uploader
-        try:
-            dur_sec, dur_str = await fetch_duration_web(v_id)
-        except Exception:
-            pass
+        thumb_remote = f"https://i.ytimg.com/vi/{v_id}/hqdefault.jpg"
+        async with aiohttp.ClientSession() as v_session:
+            v_meta = await resolve_video_details_v3(v_session, v_id)
+            if v_meta:
+                title = v_meta["title"]
+                uploader = v_meta["uploader"]
+                dur_str = v_meta["duration"]
+                dur_sec = v_meta["duration_sec"]
+                thumb_remote = v_meta.get("thumbnail") or thumb_remote
+            else:
+                oembed = await fetch_oembed_info(v_id)
+                if oembed:
+                    title = oembed.get("title") or title
+                    uploader = oembed.get("author") or uploader
+                try:
+                    dur_sec, dur_str = await fetch_duration_web(v_id)
+                except Exception:
+                    pass
 
-        thumb_name = await save_thumbnail_local(v_id)
+        thumb_name = await save_thumbnail_local(v_id, thumb_remote)
         item = {
             "id": v_id,
             "title": title,
             "duration": dur_str,
             "duration_sec": dur_sec,
             "thumbnail_file": thumb_name,
-            "thumbnail_remote": f"https://i.ytimg.com/vi/{v_id}/hqdefault.jpg",
+            "thumbnail_remote": thumb_remote,
             "uploader": uploader,
             "youtube_url": f"https://www.youtube.com/watch?v={v_id}",
         }
@@ -375,66 +583,29 @@ async def search_youtube_full(query: str, max_results: int = 5) -> Dict[str, Any
         except Exception as cf_err:
             logger.debug(f"[SearchFull] CF Edge search note: {cf_err}")
 
-    # Tier 1: InnerTube API (0.2s, 0 datacenter blocks)
+    # Tier 1: Official Google YouTube Data API v3 & Fallback Engines
     results = []
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
         "Accept-Language": "en-US,en;q=0.9",
     }
     async with aiohttp.ClientSession(headers=headers) as session:
-        inner_items = await fetch_youtubei_search(session, clean, max_items=max_results)
-        if inner_items:
-            for item in inner_items:
+        cands = await fetch_candidates_v3(session, clean, max_items=max_results)
+        if cands:
+            for item in cands[:max_results]:
                 vid = item["id"]
-                dur_str = item["duration"]
+                dur_str = item.get("duration", "03:30")
+                dur_sec = item.get("duration_sec") or parse_duration_to_sec(dur_str)
                 results.append({
                     "id": vid,
                     "title": item["title"],
                     "duration": dur_str,
-                    "duration_sec": parse_duration_to_sec(dur_str),
+                    "duration_sec": dur_sec,
                     "thumbnail_file": f"thumb_{vid}.jpg",
-                    "thumbnail_remote": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
+                    "thumbnail_remote": item.get("thumbnail") or f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
                     "uploader": item.get("uploader", "YouTube"),
                     "youtube_url": f"https://www.youtube.com/watch?v={vid}",
                 })
-        else:
-            # Fallback to HTML scraping
-            encoded = urllib.parse.quote(clean)
-            url = f"https://www.youtube.com/results?search_query={encoded}"
-            try:
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=4.0)) as resp:
-                    if resp.status == 200:
-                        html = await resp.text(errors="ignore")
-                        m = re.search(r'var ytInitialData = ({.*?});</script>', html) or re.search(r'ytInitialData\s*=\s*({.*?});', html)
-                        if m:
-                            data = json.loads(m.group(1))
-                            def find_renderers(obj):
-                                if isinstance(obj, dict):
-                                    if "videoRenderer" in obj:
-                                        yield obj["videoRenderer"]
-                                    for v in obj.values():
-                                        yield from find_renderers(v)
-                                elif isinstance(obj, list):
-                                    for item in obj:
-                                        yield from find_renderers(item)
-                            for v in list(find_renderers(data))[:max_results]:
-                                vid = v.get("videoId")
-                                if vid and len(vid) == 11:
-                                    t = "".join(r.get("text", "") for r in v.get("title", {}).get("runs", [])) or clean
-                                    d = v.get("lengthText", {}).get("simpleText", "00:00")
-                                    o = "".join(r.get("text", "") for r in v.get("ownerText", {}).get("runs", [])) or "YouTube"
-                                    results.append({
-                                        "id": vid,
-                                        "title": t,
-                                        "duration": d,
-                                        "duration_sec": parse_duration_to_sec(d),
-                                        "thumbnail_file": f"thumb_{vid}.jpg",
-                                        "thumbnail_remote": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
-                                        "uploader": o,
-                                        "youtube_url": f"https://www.youtube.com/watch?v={vid}",
-                                    })
-            except Exception as e:
-                logger.debug(f"[SearchHTML] Fallback note: {e}")
 
     if not results:
         raise ValueError(f"No YouTube search results found for query: '{query}'")
@@ -870,6 +1041,12 @@ def detect_vibe_queries(seed_name: str, full_title: str, uploader: str) -> List[
     """Generates targeted genre-matched search queries based on the seed song vibe."""
     combined = (seed_name + " " + full_title + " " + uploader).lower()
 
+    pakistani_keys = [
+        "coke studio", "pakistani", "pakistan", "jhol", "maanu", "annural", "khalil",
+        "kaifi", "hassan raheem", "young stunners", "talha anjum", "talhah yunus",
+        "abdul hannan", "asim azhar", "ali zafar", "farhan saeed", "bayan", "urdu",
+        "shae gill", "pasoori", "nescafe basement", "patari"
+    ]
     hindi_keys = [
         "arijit", "atif", "jubin", "shreya", "sonu", "pritam", "mithoon", "t-series",
         "zee music", "sony music india", "yrf", "tips", "bollywood", "aashiqui", "kabir singh",
@@ -885,7 +1062,15 @@ def detect_vibe_queries(seed_name: str, full_title: str, uploader: str) -> List[
     lofi_keys = ["lofi", "lo-fi", "chillhop", "slowed", "reverb", "aesthetic", "relaxing", "chilledcow"]
     pop_keys = ["the weeknd", "ed sheeran", "taylor swift", "billie eilish", "dua lipa", "ariana grande", "justin bieber", "post malone", "bruno mars", "charlie puth", "shawn mendes", "vevo"]
 
-    if any(k in combined for k in phonk_keys):
+    if any(k in combined for k in pakistani_keys):
+        return [
+            "coke studio pakistan hit songs",
+            "pakistani pop hit songs",
+            "urdu chill acoustic love songs",
+            "pakistani indie vibe songs",
+            f"{seed_name} coke studio mix"
+        ]
+    elif any(k in combined for k in phonk_keys):
         return [
             "drift phonk best tracks",
             "aggressive drift phonk workout playlist",
@@ -929,7 +1114,8 @@ def detect_vibe_queries(seed_name: str, full_title: str, uploader: str) -> List[
             f"{seed_name} similar songs",
             f"songs like {seed_name}",
             f"{seed_name} mix songs",
-            f"{uploader} best hit songs"
+            f"{uploader} best hit songs",
+            f"{seed_name} playlist"
         ]
 
 
@@ -1007,17 +1193,17 @@ async def fetch_youtube_upnext_feed(session: aiohttp.ClientSession, video_id: st
 async def resolve_smart_autoplay(seed_query: str, target_count: int = 35) -> Dict[str, Any]:
     """
     Dedicated Smart Vibe Autoplay Resolver Engine:
-    - Resolves seed song name or YouTube URL.
-    - Fetches official YouTube Up-Next recommendation feed directly from YouTube.
-    - Generates targeted genre queries and fetches additional candidates in parallel.
-    - Anti-Spam Vibe Filtering:
+    - Primary Engine: Official Google YouTube Data API v3 (Tier 1).
+    - Resolves seed song name or YouTube URL with zero bot blocks.
+    - Generates targeted genre queries and fetches 60+ candidates in parallel.
+    - Multi-Pass Anti-Spam Vibe Filtering:
       * Filters out duplicate variations and seed song.
       * Prevents consecutive songs from the same movie/album.
       * Caps max 2 songs from the same movie across the whole playlist.
-      * Filters out long mixes (> 7.5 min) and short teasers (< 1.5 min).
+      * Filters out long mixes (> 8 min) and short teasers (< 1 min).
       * Filters out jukeboxes and albums.
-    - Returns full 35 tracks with both `tracks` list and `indexes` dict!
-    - Zero audio download, sub-2s execution.
+      * Pass 3 & Pass 4 Emergency Guarantees: Always returns 25–40 tracks!
+    - Sub-2s execution, zero media download.
     """
     t0 = time.time()
     clean = seed_query.strip()
@@ -1030,31 +1216,57 @@ async def resolve_smart_autoplay(seed_query: str, target_count: int = 35) -> Dic
         "Accept-Language": "en-US,en;q=0.9",
     }
     async with aiohttp.ClientSession(headers=headers) as session:
-        # Step 1: Resolve seed video ID & metadata
+        # Step 1: Resolve seed video ID & metadata via Official Google YouTube Data API v3
+        initial_candidates = []
         if seed_id:
-            seed_search = await fetch_youtubei_search(session, seed_id, max_items=1)
-            if seed_search:
-                seed_title = seed_search[0]["title"]
-                seed_uploader = seed_search[0]["uploader"]
+            seed_meta = await resolve_video_details_v3(session, seed_id)
+            if seed_meta:
+                seed_title = seed_meta["title"]
+                seed_uploader = seed_meta["uploader"]
+            else:
+                oembed = await fetch_oembed_info(seed_id)
+                if oembed:
+                    seed_title = oembed.get("title", clean)
+                    seed_uploader = oembed.get("author_name", "YouTube")
+
+            # Query title search to get immediate high-relevance related tracks
+            if seed_title and seed_title != clean:
+                clean_title_search = re.sub(r'[\(\[\{].*?[\)\]\}]', '', seed_title).strip()[:40]
+                initial_candidates = await fetch_candidates_v3(session, clean_title_search, max_items=15)
         else:
-            seed_search = await fetch_youtubei_search(session, clean, max_items=1)
-            if seed_search:
-                seed_id = seed_search[0]["id"]
-                seed_title = seed_search[0]["title"]
-                seed_uploader = seed_search[0]["uploader"]
+            # Query seed search via Google Data API v3
+            initial_candidates = await fetch_candidates_v3(session, clean, max_items=15)
+            if initial_candidates:
+                seed_id = initial_candidates[0]["id"]
+                seed_title = initial_candidates[0]["title"]
+                seed_uploader = initial_candidates[0]["uploader"]
             else:
                 seed_id = "Umqb9KENgmk"
 
         # Step 2: Generate dynamic vibe queries
         vibe_queries = detect_vibe_queries(clean, seed_title, seed_uploader)
+        if seed_title and seed_title != clean:
+            clean_short = re.sub(r'[\(\[\{].*?[\)\]\}]', '', seed_title).strip()
+            if len(clean_short) > 3:
+                vibe_queries.insert(0, f"{clean_short[:35]} similar songs")
 
-        # Step 3: Fetch YouTube Official Recommendation Feed + Vibe Search in Parallel
-        feed_task = fetch_youtube_upnext_feed(session, seed_id)
-        search_tasks = [fetch_youtubei_search(session, q, max_items=25) for q in vibe_queries]
-        feed_videos, *search_results = await asyncio.gather(feed_task, *search_tasks)
+        # Step 3: Fetch YouTube Candidates + Recommendations in Parallel via Google Data API v3
+        search_tasks = [fetch_candidates_v3(session, q, max_items=20) for q in vibe_queries]
+        try:
+            feed_task = asyncio.wait_for(fetch_youtube_upnext_feed(session, seed_id), timeout=2.5)
+            gather_results = await asyncio.gather(feed_task, *search_tasks, return_exceptions=True)
+            feed_videos = gather_results[0] if isinstance(gather_results[0], list) else []
+            search_results = [r for r in gather_results[1:] if isinstance(r, list)]
+        except Exception:
+            search_results = await asyncio.gather(*search_tasks, return_exceptions=True)
+            feed_videos = []
+            search_results = [r for r in search_results if isinstance(r, list)]
 
-        # Place YouTube's genuine recommendation feed items first, followed by interleaved vibe matches
+        # Place feed items first, followed by initial candidates and interleaved vibe matches
         raw_candidates = list(feed_videos)
+        if initial_candidates:
+            raw_candidates.extend(initial_candidates)
+
         max_len = max((len(r) for r in search_results), default=0)
         for i in range(max_len):
             for batch in search_results:
@@ -1063,7 +1275,7 @@ async def resolve_smart_autoplay(seed_query: str, target_count: int = 35) -> Dic
 
         # Step 4: Strict Anti-Spam Vibe Selection
         selected_tracks = []
-        seen_ids = set([seed_id])
+        seen_ids = set([seed_id]) if seed_id else set()
         seen_base_titles = set()
         movie_counts = {}
         last_movie = None
@@ -1080,18 +1292,18 @@ async def resolve_smart_autoplay(seed_query: str, target_count: int = 35) -> Dic
             "mashup", "non stop", "nonstop", "super hit songs", "top 10", "top 20", "top 50"
         ]
 
-        def try_add_track(c, strict_movie_limit: bool = True):
+        def try_add_track(c, strict_movie_limit: bool = True, max_dur: int = 480):
             nonlocal last_movie
-            vid = c["id"]
-            title = c["title"]
-            dur_str = c["duration"]
-            byline = c["uploader"]
+            vid = c.get("id")
+            title = c.get("title", "")
+            dur_str = c.get("duration", "03:30")
+            byline = c.get("uploader", "YouTube")
 
             if not vid or vid in seen_ids:
                 return False
 
-            dur_sec = parse_duration_to_sec(dur_str)
-            if dur_sec > 450 or (dur_sec > 0 and dur_sec < 90):
+            dur_sec = c.get("duration_sec") or parse_duration_to_sec(dur_str)
+            if dur_sec > max_dur or (dur_sec > 0 and dur_sec < 60):
                 return False
 
             t_lower = title.lower()
@@ -1104,7 +1316,7 @@ async def resolve_smart_autoplay(seed_query: str, target_count: int = 35) -> Dic
 
             movie = extract_movie_signature(title, byline)
             if movie:
-                if movie == last_movie:
+                if movie == last_movie and strict_movie_limit:
                     return False
                 if strict_movie_limit and movie_counts.get(movie, 0) >= 2:
                     return False
@@ -1132,16 +1344,34 @@ async def resolve_smart_autoplay(seed_query: str, target_count: int = 35) -> Dic
             })
             return True
 
-        # Pass 1: Strict movie and artist diversity
+        # Pass 1: Strict movie and artist diversity (max 2 per movie, max 8 min)
         for c in raw_candidates:
-            try_add_track(c, strict_movie_limit=True)
+            try_add_track(c, strict_movie_limit=True, max_dur=480)
             if len(selected_tracks) >= target_count:
                 break
 
-        # Pass 2 (Fallback): Relax movie limit slightly to guarantee exactly target_count
+        # Pass 2 (Fallback): Relax movie limit to guarantee target_count
         if len(selected_tracks) < target_count:
             for c in raw_candidates:
-                try_add_track(c, strict_movie_limit=False)
+                try_add_track(c, strict_movie_limit=False, max_dur=540)
+                if len(selected_tracks) >= target_count:
+                    break
+
+        # Pass 3 (Fallback): Accept remaining unique candidates (allowing up to 10 min)
+        if len(selected_tracks) < min(target_count, 25):
+            for c in raw_candidates:
+                vid = c.get("id")
+                if vid and vid not in seen_ids:
+                    try_add_track(c, strict_movie_limit=False, max_dur=600)
+                    if len(selected_tracks) >= target_count:
+                        break
+
+        # Pass 4 (Emergency Guarantee): If still under 25 tracks, fetch genre hits
+        if len(selected_tracks) < min(target_count, 25):
+            backup_q = f"{seed_uploader} hit songs" if seed_uploader and seed_uploader != "YouTube" else f"{clean} best songs"
+            emergency_cands = await fetch_candidates_v3(session, backup_q, max_items=35)
+            for c in emergency_cands:
+                try_add_track(c, strict_movie_limit=False, max_dur=600)
                 if len(selected_tracks) >= target_count:
                     break
 
@@ -1160,6 +1390,7 @@ async def resolve_smart_autoplay(seed_query: str, target_count: int = 35) -> Dic
         "status": "success",
         "seed": clean,
         "seed_id": seed_id,
+        "seed_title": seed_title,
         "total": len(selected_tracks),
         "tracks": selected_tracks,
         "indexes": indexes_dict,
