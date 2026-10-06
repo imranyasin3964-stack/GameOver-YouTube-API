@@ -21,6 +21,8 @@ HOST = os.getenv("API_HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", os.getenv("API_PORT", "7860")))
 BASE_URL = os.getenv("BASE_URL", "https://youtubeapiv2.gameoverhostingservice.workers.dev")
 CF_WORKER_URL = os.getenv("CF_WORKER_URL", "https://youtubeapiv2.gameoverhostingservice.workers.dev")
+RENDER_SEARCH_URL = os.getenv("RENDER_SEARCH_URL", "https://yt-search-api-hjod.onrender.com")
+YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY", "AIzaSyB7-u3OZbeThZz2RcxIYO6KXRCVQyYh-hI")
 
 # Cache & Storage limits (50 GB Capacity, Permanent Storage - No Auto-Delete)
 MAX_CACHE_SIZE_GB = float(os.getenv("MAX_CACHE_SIZE_GB", "50.0"))

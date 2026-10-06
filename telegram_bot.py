@@ -46,14 +46,15 @@ USER_STATES: Dict[int, Dict[str, Any]] = {}
 
 
 def get_main_keyboard() -> dict:
-    """Mobile-friendly 10-Button Grid with Close button and non-sticky keyboard"""
+    """Mobile-friendly Grid with Close button and non-sticky keyboard"""
     return {
         "keyboard": [
             [{"text": "⚡ API Eɴᴅᴘᴏɪɴᴛs"}, {"text": "🔍 Tᴇsᴛ Sᴇᴀʀᴄʜ"}],
-            [{"text": "📊 Sᴛᴀᴛs"}, {"text": "🌐 IPs Lɪsᴛ"}],
-            [{"text": "🚫 Bʟᴏᴄᴋ Mᴀɴᴀɢᴇʀ"}, {"text": "⏱️ Lɪᴍɪᴛ Mᴀɴᴀɢᴇʀ"}],
-            [{"text": "👥 Aᴅᴍɪɴs"}, {"text": "🔄 Rᴇʙᴏᴏᴛ Sᴘᴀᴄᴇ"}],
-            [{"text": "🧹 Cʟᴇᴀʀ Oʟᴅ Lᴏɢs"}, {"text": "❌ Cʟᴏsᴇ Mᴇɴᴜ"}],
+            [{"text": "📊 Sᴛᴀᴛs"}, {"text": "🌾 Aᴜᴛᴏ-Hᴀʀᴠᴇsᴛ"}],
+            [{"text": "🌐 IPs Lɪsᴛ"}, {"text": "🚫 Bʟᴏᴄᴋ Mᴀɴᴀɢᴇʀ"}],
+            [{"text": "⏱️ Lɪᴍɪᴛ Mᴀɴᴀɢᴇʀ"}, {"text": "👥 Aᴅᴍɪɴs"}],
+            [{"text": "🔄 Rᴇʙᴏᴏᴛ Sᴘᴀᴄᴇ"}, {"text": "🧹 Cʟᴇᴀʀ Oʟᴅ Lᴏɢs"}],
+            [{"text": "❌ Cʟᴏsᴇ Mᴇɴᴜ"}],
         ],
         "resize_keyboard": True,
     }
@@ -942,6 +943,44 @@ async def handle_clear_old_logs(chat_id: int):
     await send_msg(chat_id, f"🧹 <b>Cʟᴇᴀɴᴇᴅ {count} ᴏʟᴅ ʙᴏᴛ ᴍᴇssᴀɢᴇs</b> (older than 24 hours).", reply_markup=get_main_keyboard())
 
 
+async def handle_harvest_menu(chat_id: int, message_id_to_edit: Optional[int] = None):
+    from harvester import harvest_manager
+    st = harvest_manager.get_status()
+    running_icon = "🟢 RUNNING" if st["is_running"] else "🔴 STOPPED"
+
+    text = (
+        f"🌾 <b>Aᴜᴛᴏ-Hᴀʀᴠᴇsᴛ &amp; Pʀᴇ-Cᴀᴄʜᴇ Eɴɢɪɴᴇ</b>\n\n"
+        f"• <b>Sᴛᴀᴛᴜs:</b> <b>{running_icon}</b>\n"
+        f"• <b>Cᴜʀʀᴇɴᴛ Gᴇɴʀᴇ:</b> <code>{st['current_genre']}</code>\n"
+        f"• <b>Cᴜʀʀᴇɴᴛ Sᴏɴɢ:</b> <code>{st['current_song'][:35]}</code>\n\n"
+        f"📊 <b>Pʀᴏɢʀᴇss:</b>\n"
+        f"• <b>Dᴏᴡɴʟᴏᴀᴅᴇᴅ (2-in-1):</b> <code>{st['total_downloaded']}</code>\n"
+        f"• <b>Aʟʀᴇᴀᴅʏ Cᴀᴄʜᴇᴅ (Sᴋɪᴘᴘᴇᴅ):</b> <code>{st['total_skipped']}</code>\n"
+        f"• <b>Fᴀɪʟᴇᴅ:</b> <code>{st['total_failed']}</code>\n\n"
+        f"💾 <b>Lɪᴠᴇ NVMe Sᴛᴏʀᴀɢᴇ:</b>\n"
+        f"• <b>Fʀᴇᴇ Sᴘᴀᴄᴇ:</b> <code>{st['disk_free_gb']} GB</code>\n"
+        f"• <b>Usᴇᴅ Sᴘᴀᴄᴇ:</b> <code>{st['disk_used_gb']} GB</code> / <code>{st['disk_total_gb']} GB</code>\n\n"
+        f"⚡ <i>Dᴏᴡɴʟᴏᴀᴅs 480p Vɪᴅᴇᴏ + 48kHz OPUS Aᴜᴅɪᴏ ɪɴᴛᴏ ʙᴜᴄᴋᴇᴛ sᴏ ᴛʜᴇʏ ʜɪᴛ ɪɴsᴛᴀɴᴛʟʏ!</i>"
+    )
+
+    buttons = []
+    if not st["is_running"]:
+        buttons.append([{"text": "🚀 Sᴛᴀʀᴛ Aᴜᴛᴏ-Hᴀʀᴠᴇsᴛ (50/Gᴇɴʀᴇ)", "callback_data": "harvest:start"}])
+    else:
+        buttons.append([{"text": "⏸️ Sᴛᴏᴘ Aᴜᴛᴏ-Hᴀʀᴠᴇsᴛ", "callback_data": "harvest:stop"}])
+
+    buttons.append([
+        {"text": "🔄 Rᴇғʀᴇsʜ Sᴛᴀᴛᴜs", "callback_data": "harvest:refresh"},
+        {"text": "📊 Gᴇɴᴇʀᴀʟ Sᴛᴀᴛs", "callback_data": "stats_menu"}
+    ])
+
+    inline_kb = {"inline_keyboard": buttons}
+    if message_id_to_edit:
+        await edit_msg(chat_id, message_id_to_edit, text, reply_markup=inline_kb)
+    else:
+        await send_msg(chat_id, text, reply_markup=inline_kb)
+
+
 async def handle_api_endpoints(chat_id: int):
     clean_base = BASE_URL.rstrip("/")
     text = (
@@ -986,6 +1025,7 @@ async def handle_api_endpoints(chat_id: int):
 
 async def handle_endpoint_json_sample(chat_id: int, ep_type: str):
     clean_base = BASE_URL.rstrip("/")
+    test_cb = f"quick_test:{ep_type}:fakira"
     if ep_type in ("audio", "opus"):
         sample = {
             "status": "success",
@@ -1094,6 +1134,7 @@ async def handle_endpoint_json_sample(chat_id: int, ep_type: str):
         }
         title = "🔍 Sᴇᴀʀᴄʜ API Rᴇsᴘᴏɴsᴇ JSOɴ"
         get_url = f"{clean_base}/search?query=fakira"
+        test_cb = "quick_test:search:fakira"
     elif ep_type == "autoplay":
         sample = {
             "status": "success",
@@ -1522,6 +1563,39 @@ async def handle_callback_query(cq: dict):
         yt_url = f"https://www.youtube.com/watch?v=eJuoi13hbBc" if not vid_id else f"https://www.youtube.com/watch?v={vid_id}"
         asyncio.create_task(execute_api_test(chat_id, yt_url, forced_mode=mode))
 
+    elif data == "harvest_menu":
+        await handle_harvest_menu(chat_id, message_id_to_edit=msg.get("message_id"))
+
+    elif data == "harvest:start":
+        if user_id != OWNER_ID:
+            await send_msg(chat_id, "⚠️ Oɴʟʏ ᴛʜᴇ Oᴡɴᴇʀ ᴄᴀɴ sᴛᴀʀᴛ Aᴜᴛᴏ-Hᴀʀᴠᴇsᴛ.")
+            return
+        from harvester import harvest_manager
+        started = harvest_manager.start(
+            target_per_category=50,
+            notify_callback=lambda txt: send_msg(chat_id, txt)
+        )
+        if started:
+            await send_msg(chat_id, "🚀 <b>Aᴜᴛᴏ-Hᴀʀᴠᴇsᴛ Eɴɢɪɴᴇ Sᴛᴀʀᴛᴇᴅ!</b>\nDownloading 50 curated tracks per genre...")
+        else:
+            await send_msg(chat_id, "ℹ️ <b>Aᴜᴛᴏ-Hᴀʀᴠᴇsᴛ ɪs ᴀʟʀᴇᴀᴅʏ ʀᴜɴɴɪɴɢ!</b>")
+        await handle_harvest_menu(chat_id, message_id_to_edit=msg.get("message_id"))
+
+    elif data == "harvest:stop":
+        if user_id != OWNER_ID:
+            await send_msg(chat_id, "⚠️ Oɴʟʏ ᴛʜᴇ Oᴡɴᴇʀ ᴄᴀɴ sᴛᴏᴘ Aᴜᴛᴏ-Hᴀʀᴠᴇsᴛ.")
+            return
+        from harvester import harvest_manager
+        stopped = harvest_manager.stop()
+        if stopped:
+            await send_msg(chat_id, "⏸️ <b>Aᴜᴛᴏ-Hᴀʀᴠᴇsᴛ Sᴛᴏᴘᴘᴇᴅ!</b>")
+        else:
+            await send_msg(chat_id, "ℹ️ <b>Aᴜᴛᴏ-Hᴀʀᴠᴇsᴛ ᴡᴀs ɴᴏᴛ ʀᴜɴɴɪɴɢ.</b>")
+        await handle_harvest_menu(chat_id, message_id_to_edit=msg.get("message_id"))
+
+    elif data == "harvest:refresh":
+        await handle_harvest_menu(chat_id, message_id_to_edit=msg.get("message_id"))
+
 
     elif data.startswith("toggle_block:"):
         ip = data.split(":", 1)[1]
@@ -1643,6 +1717,9 @@ async def handle_message(msg: dict):
 
     elif text == "📊 Sᴛᴀᴛs" or t_upper in ("STATS", "📊 STATS", "/STATS"):
         await handle_stats(chat_id)
+
+    elif text in ("🌾 Aᴜᴛᴏ-Hᴀʀᴠᴇsᴛ", "/harvest", "/autoharvest") or "HARVEST" in t_upper:
+        await handle_harvest_menu(chat_id)
 
     elif text == "🌐 IPs Lɪsᴛ" or "IPS LIST" in t_upper or t_upper in ("IPS", "IP LIST"):
         await handle_ips_list(chat_id)

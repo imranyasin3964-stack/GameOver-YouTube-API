@@ -866,6 +866,33 @@ def range_requests_response(request: Request, file_path: Path):
         return Response(status_code=500, content=str(e))
 
 
+@app.get("/harvest/status")
+async def api_harvest_status():
+    """Live status of the Auto-Harvest background worker"""
+    from harvester import harvest_manager
+    return harvest_manager.get_status()
+
+
+@app.get("/harvest/start")
+async def api_harvest_start(target: int = Query(50, ge=5, le=100)):
+    """Starts background Auto-Harvest engine (default 50 tracks per genre)"""
+    from harvester import harvest_manager
+    from telegram_bot import send_msg, OWNER_ID
+    started = harvest_manager.start(
+        target_per_category=target,
+        notify_callback=lambda txt: send_msg(OWNER_ID, txt)
+    )
+    return {"status": "started" if started else "already_running", "target_per_category": target}
+
+
+@app.get("/harvest/stop")
+async def api_harvest_stop():
+    """Stops the Auto-Harvest engine safely"""
+    from harvester import harvest_manager
+    stopped = harvest_manager.stop()
+    return {"status": "stopped" if stopped else "not_running"}
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host=HOST, port=PORT, reload=False, workers=1)

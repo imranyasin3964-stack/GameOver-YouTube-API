@@ -9,7 +9,7 @@ import urllib.parse
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple, List
 
-from config import CACHE_DIR, CF_WORKER_URL
+from config import CACHE_DIR, CF_WORKER_URL, RENDER_SEARCH_URL
 
 logger = logging.getLogger("GameOverAPI.ScraperEngine")
 
@@ -146,7 +146,29 @@ async def search_youtube_web(query: str) -> Optional[Dict[str, str]]:
     if v_id:
         return {"video_id": v_id, "url": f"https://www.youtube.com/watch?v={v_id}", "title": clean_query}
 
-    # Tier 0: Cloudflare Edge Search Proxy (100% bypass on Hugging Face)
+    # Tier 0: Dedicated Render Search API (Original YouTube Algorithm & Ranking)
+    if RENDER_SEARCH_URL:
+        try:
+            r_url = f"{RENDER_SEARCH_URL.rstrip('/')}/search?query={urllib.parse.quote(clean_query)}"
+            r_headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
+                "Accept": "application/json",
+            }
+            async with aiohttp.ClientSession(headers=r_headers) as r_session:
+                async with r_session.get(r_url, timeout=aiohttp.ClientTimeout(total=4.5)) as r_resp:
+                    if r_resp.status == 200:
+                        r_data = await r_resp.json()
+                        prim = r_data.get("primary") or {}
+                        vid = prim.get("id") or r_data.get("id")
+                        if vid:
+                            v_url = prim.get("youtube_url") or f"https://www.youtube.com/watch?v={vid}"
+                            t = prim.get("title") or clean_query
+                            logger.info(f"[WebSearch][Render] Found: '{t}' ({vid})")
+                            return {"video_id": vid, "url": v_url, "title": t}
+        except Exception as r_err:
+            logger.debug(f"[WebSearch] Render search note: {r_err}")
+
+    # Tier 1: Cloudflare Edge Search Proxy (Fallback)
     if CF_WORKER_URL:
         try:
             cf_url = f"{CF_WORKER_URL.rstrip('/')}/search?query={urllib.parse.quote(clean_query)}"
@@ -241,7 +263,66 @@ async def search_youtube_full(query: str, max_results: int = 5) -> Dict[str, Any
             "results": [item],
         }
 
-    # 2. General Search: Tier 0 Cloudflare Edge Search Proxy (100% bypass on Hugging Face)
+    # 2. General Search: Tier 0 Render Search API (Original YouTube Algorithm & Ranking)
+    if RENDER_SEARCH_URL:
+        try:
+            r_url = f"{RENDER_SEARCH_URL.rstrip('/')}/search?query={urllib.parse.quote(clean)}"
+            r_headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
+                "Accept": "application/json",
+            }
+            async with aiohttp.ClientSession(headers=r_headers) as r_session:
+                async with r_session.get(r_url, timeout=aiohttp.ClientTimeout(total=6.5)) as r_resp:
+                    if r_resp.status == 200:
+                        r_data = await r_resp.json()
+                        prim = r_data.get("primary") or {}
+                        primary_id = prim.get("id") or r_data.get("id")
+                        if primary_id:
+                            primary_thumb = prim.get("thumbnail") or f"https://i.ytimg.com/vi/{primary_id}/hqdefault.jpg"
+                            await save_thumbnail_local(primary_id, primary_thumb)
+
+                            raw_results = r_data.get("results") or []
+                            formatted_results = []
+                            for r in raw_results[:max_results]:
+                                r_id = r.get("id")
+                                if not r_id:
+                                    continue
+                                r_thumb = r.get("thumbnail") or f"https://i.ytimg.com/vi/{r_id}/hqdefault.jpg"
+                                r_dur = r.get("duration", "03:30")
+                                r_dur_sec = r.get("duration_sec") or parse_duration_to_sec(r_dur)
+                                formatted_results.append({
+                                    "id": r_id,
+                                    "title": r.get("title", clean),
+                                    "duration": r_dur,
+                                    "duration_sec": r_dur_sec,
+                                    "thumbnail_file": f"thumb_{r_id}.jpg",
+                                    "thumbnail_remote": r_thumb,
+                                    "uploader": r.get("uploader", "YouTube"),
+                                    "youtube_url": r.get("youtube_url") or f"https://www.youtube.com/watch?v={r_id}",
+                                })
+
+                            prim_dur = prim.get("duration", "03:30")
+                            prim_dur_sec = prim.get("duration_sec") or parse_duration_to_sec(prim_dur)
+                            primary_obj = {
+                                "id": primary_id,
+                                "title": prim.get("title", clean),
+                                "duration": prim_dur,
+                                "duration_sec": prim_dur_sec,
+                                "thumbnail_file": f"thumb_{primary_id}.jpg",
+                                "thumbnail_remote": primary_thumb,
+                                "uploader": prim.get("uploader", "YouTube"),
+                                "youtube_url": prim.get("youtube_url") or f"https://www.youtube.com/watch?v={primary_id}",
+                            }
+
+                            logger.info(f"[SearchFull][Render] Success for '{clean}': {primary_id} ('{primary_obj['title']}')")
+                            return {
+                                "primary": primary_obj,
+                                "results": formatted_results if formatted_results else [primary_obj],
+                            }
+        except Exception as r_err:
+            logger.debug(f"[SearchFull] Render search note: {r_err}")
+
+    # Tier 1: Cloudflare Edge Search Proxy (Fallback)
     if CF_WORKER_URL:
         try:
             cf_url = f"{CF_WORKER_URL.rstrip('/')}/search?query={urllib.parse.quote(clean)}"
@@ -484,9 +565,9 @@ async def download_via_loader(
                 if not progress_url:
                     return False
 
-            # Ultra-fast polling: 0.2s initial, then 0.4s intervals (up to ~36s)
-            for attempt in range(90):
-                await asyncio.sleep(0.2 if attempt == 0 else 0.4)
+            # Ultra-fast polling: 0.15s initial, then 0.35s intervals (up to ~42s)
+            for attempt in range(120):
+                await asyncio.sleep(0.15 if attempt == 0 else 0.35)
                 try:
                     async with session.get(progress_url, timeout=aiohttp.ClientTimeout(total=4.0)) as resp2:
                         if resp2.status == 200:
