@@ -2,13 +2,15 @@
 harvester.py - Dedicated Auto-Harvest & Pre-Cache Engine for GameOver YouTube API
 ==================================================================================
 Features:
-- Multi-Genre Discovery (Bollywood, Pakistani/CokeStudio/Dukhi, Arabic, Russian/Phonk, Folk, Hollywood)
+- Multi-Engine Concurrency: 3 Parallel download slots running simultaneously
+- Multi-Genre Discovery: Bollywood, Pakistani (CokeStudio/Dukhi/Jhol), Arabic, Russian/Phonk, Folk, Hollywood
 - Uses Official Google YouTube Data API v3 (AIzaSyB7-u3OZbeThZz2RcxIYO6KXRCVQyYh-hI) with Render fallback
 - 50+ unique, curated, famous tracks per genre
-- Strict Deduplication: Skips if video_480 and audio_opus are already cached on disk or DB
+- Strict Deduplication: Skips if video_480 and audio_opus are already cached on disk or DB (Zero repeat downloads)
 - 2-in-1 Fast Pipeline: Downloads 480p Video -> Extracts Studio HD Opus via local FFmpeg in 0.1s!
+- Instant Telegram Notification for EVERY song cached with full details and live disk space
 - Live NVMe Disk Monitoring (tracks actual used/free GB, safety stop if free < 3 GB)
-- Non-blocking async background worker with Start/Stop/Status controls for Telegram Bot
+- Non-blocking async background worker with Start/Stop/Status controls for Telegram Bot & REST API
 """
 
 import asyncio
@@ -118,14 +120,17 @@ class HarvestManager:
         self.total_downloaded: int = 0
         self.total_skipped: int = 0
         self.total_failed: int = 0
+        self.concurrency: int = 3
         self.start_time: float = 0.0
         self.last_status_msg: str = "Idle"
+        self._notify_lock = asyncio.Lock()
 
     def get_status(self) -> Dict[str, Any]:
         disk_stats = self.get_disk_stats()
         uptime_sec = int(time.time() - self.start_time) if self.is_running and self.start_time > 0 else 0
         return {
             "is_running": self.is_running,
+            "concurrency": self.concurrency,
             "current_genre": self.current_genre or "None",
             "current_song": self.current_song or "None",
             "total_downloaded": self.total_downloaded,
@@ -150,7 +155,12 @@ class HarvestManager:
         except Exception:
             return {"free_gb": 0.0, "used_gb": 0.0, "total_gb": 0.0}
 
-    def start(self, target_per_category: int = 50, notify_callback: Optional[Callable[[str], Any]] = None) -> bool:
+    def start(
+        self,
+        target_per_category: int = 50,
+        concurrency: int = 3,
+        notify_callback: Optional[Callable[[str], Any]] = None
+    ) -> bool:
         if self.is_running:
             return False
         self.is_running = True
@@ -159,7 +169,8 @@ class HarvestManager:
         self.total_downloaded = 0
         self.total_skipped = 0
         self.total_failed = 0
-        self.last_status_msg = "Harvesting Started"
+        self.concurrency = max(1, min(5, concurrency))
+        self.last_status_msg = f"Harvesting Active ({self.concurrency} Parallel Slots)"
         self.task = asyncio.create_task(self._run_loop(target_per_category))
         return True
 
@@ -174,12 +185,13 @@ class HarvestManager:
 
     async def _send_notify(self, text: str):
         if self.notify_cb:
-            try:
-                res = self.notify_cb(text)
-                if asyncio.iscoroutine(res):
-                    await res
-            except Exception as e:
-                logger.debug(f"[Harvester] Notify callback note: {e}")
+            async with self._notify_lock:
+                try:
+                    res = self.notify_cb(text)
+                    if asyncio.iscoroutine(res):
+                        await res
+                except Exception as e:
+                    logger.debug(f"[Harvester] Notify callback note: {e}")
 
     @staticmethod
     def _parse_iso_duration(dur_str: str) -> tuple[str, int]:
@@ -280,10 +292,12 @@ class HarvestManager:
         """
         Downloads 480p Video -> Extracts Studio HD Opus locally in 0.1s!
         Saves thumbnails and records metadata in controller database.
+        Returns True if a new song was successfully downloaded & cached.
+        Returns False if already cached (skipped) or failed.
         """
         v_id = track["id"]
         title = track["title"]
-        uploader = track["uploader"]
+        uploader = track.get("uploader", "YouTube")
         dur_str = track.get("duration", "03:30")
         dur_sec = track.get("duration_sec", 210)
         thumb_url = track.get("thumbnail") or f"https://i.ytimg.com/vi/{v_id}/hqdefault.jpg"
@@ -298,11 +312,11 @@ class HarvestManager:
 
         if has_video and has_opus:
             self.total_skipped += 1
-            logger.info(f"[Harvester] Already cached on disk: {v_id} ('{title}') - Skipping.")
-            return True
+            logger.info(f"[Harvester] Already fully cached: {v_id} ('{title}') - Skipping.")
+            return False
 
         self.current_song = title
-        logger.info(f"[Harvester] Processing: {v_id} - '{title}'...")
+        logger.info(f"[Harvester] Downloading: {v_id} - '{title}'...")
 
         # Step 1: Download 480p Video if missing
         if not has_video:
@@ -351,19 +365,77 @@ class HarvestManager:
         logger.info(f"[Harvester] SUCCESS ✅: {v_id} ('{title}') | Video: {has_video} | Opus: {has_opus}")
         return True
 
+    async def _worker(self, queue: asyncio.Queue, sem: asyncio.Semaphore):
+        """Worker task consuming tracks from the queue with bounded concurrency"""
+        while self.is_running:
+            try:
+                track = await asyncio.wait_for(queue.get(), timeout=2.0)
+            except asyncio.TimeoutError:
+                if queue.empty():
+                    break
+                continue
+            except asyncio.CancelledError:
+                break
+
+            try:
+                async with sem:
+                    if not self.is_running:
+                        queue.task_done()
+                        break
+
+                    # Disk free safety check
+                    disk = self.get_disk_stats()
+                    if disk["free_gb"] < 3.0:
+                        warn_msg = f"⚠️ <b>Storage Warning:</b> Only {disk['free_gb']} GB free remaining in bucket! Stopping harvest."
+                        logger.warning(warn_msg)
+                        await self._send_notify(warn_msg)
+                        self.stop()
+                        queue.task_done()
+                        break
+
+                    ok = await self._harvest_single_track(track)
+                    if ok:
+                        # Instant Telegram Notification for this exact resolved song!
+                        disk_now = self.get_disk_stats()
+                        dur = track.get("duration", "03:30")
+                        uploader = track.get("uploader", "YouTube")
+                        msg = (
+                            f"✅ <b>Sᴏɴɢ Cᴀᴄʜᴇᴅ (2-ɪɴ-1 Rᴇᴀᴅʏ)!</b>\n\n"
+                            f"🎵 <b>Tɪᴛʟᴇ:</b> <code>{track['title']}</code>\n"
+                            f"👤 <b>Aʀᴛɪsᴛ:</b> {uploader}\n"
+                            f"⏱️ <b>Dᴜʀᴀᴛɪᴏɴ:</b> <code>{dur}</code>\n"
+                            f"📂 <b>Gᴇɴʀᴇ:</b> {self.current_genre}\n"
+                            f"📦 <b>Fᴏʀᴍᴀᴛs:</b> 🎬 480p Video + 🎙️ 48kHz Opus Audio\n"
+                            f"💾 <b>NVMe Fʀᴇᴇ:</b> <code>{disk_now['free_gb']} GB</code> / <code>{disk_now['total_gb']} GB</code>\n"
+                            f"📊 <b>Tᴏᴛᴀʟ Cᴀᴄʜᴇᴅ:</b> <code>{self.total_downloaded}</code> (Skipped: {self.total_skipped})"
+                        )
+                        await self._send_notify(msg)
+
+                    await asyncio.sleep(1.5)
+            except Exception as e:
+                logger.error(f"[Harvester Worker] Error processing track: {e}")
+            finally:
+                queue.task_done()
+
     async def _run_loop(self, target_per_category: int):
-        logger.info(f"[Harvester] Loop started with target {target_per_category} tracks/genre.")
-        await self._send_notify(f"🚀 <b>Auto-Harvest Engine Started!</b>\nTarget: {target_per_category} songs per genre.\nMonitoring storage in real-time...")
+        logger.info(f"[Harvester] Multi-engine loop started: {self.concurrency} slots, target {target_per_category}/genre.")
+        await self._send_notify(
+            f"🚀 <b>Auto-Harvest Multi-Engine Started!</b>\n"
+            f"⚡ <b>Parallel Slots:</b> <code>{self.concurrency} Slots</code>\n"
+            f"🎯 <b>Target:</b> <code>{target_per_category} Songs / Genre</code>\n"
+            f"📦 <b>Formats:</b> 🎬 480p Video + 🎙️ 48kHz Opus Audio"
+        )
 
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         async with aiohttp.ClientSession(headers=headers) as session:
+            sem = asyncio.Semaphore(self.concurrency)
             for g_key, g_info in HARVEST_GENRES.items():
                 if not self.is_running:
                     break
 
                 self.current_genre = g_info["label"]
                 logger.info(f"[Harvester] >>> Starting Genre: {self.current_genre} <<<")
-                await self._send_notify(f"📁 <b>Starting Category:</b>\n{self.current_genre}")
+                await self._send_notify(f"📁 <b>Starting Category:</b>\n{self.current_genre}\n<i>Parallel Engine Active ({self.concurrency} Slots)</i>")
 
                 gathered_tracks: List[Dict[str, Any]] = []
                 seen_vids = set()
@@ -379,44 +451,28 @@ class HarvestManager:
                             gathered_tracks.append(c)
                             if len(gathered_tracks) >= target_per_category:
                                 break
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(0.3)
 
                 logger.info(f"[Harvester] Found {len(gathered_tracks)} unique candidates for {g_key}.")
 
-                genre_downloaded = 0
-                for track in gathered_tracks:
-                    if not self.is_running:
-                        break
+                # Enqueue all tracks for parallel worker consumption
+                queue = asyncio.Queue()
+                for t in gathered_tracks:
+                    await queue.put(t)
 
-                    # Disk free safety check
-                    disk = self.get_disk_stats()
-                    if disk["free_gb"] < 3.0:
-                        warn_msg = f"⚠️ <b>Storage Warning:</b> Only {disk['free_gb']} GB free remaining in bucket! Stopping harvest safely."
-                        logger.warning(warn_msg)
-                        await self._send_notify(warn_msg)
-                        self.stop()
-                        return
+                # Launch concurrent worker pool
+                workers = [asyncio.create_task(self._worker(queue, sem)) for _ in range(self.concurrency)]
+                await queue.join()
 
-                    ok = await self._harvest_single_track(track)
-                    if ok:
-                        genre_downloaded += 1
+                # Cleanup workers for this genre
+                for w in workers:
+                    if not w.done():
+                        w.cancel()
+                await asyncio.gather(*workers, return_exceptions=True)
 
-                    # Send milestone notification every 10 songs
-                    if (self.total_downloaded + self.total_skipped) % 10 == 0:
-                        status_report = (
-                            f"📊 <b>Harvest Progress Update:</b>\n\n"
-                            f"📂 <b>Category:</b> {self.current_genre}\n"
-                            f"✅ <b>Downloaded:</b> {self.total_downloaded}\n"
-                            f"⏭️ <b>Already Cached (Skipped):</b> {self.total_skipped}\n"
-                            f"💾 <b>Disk Free:</b> {disk['free_gb']} GB / {disk['total_gb']} GB\n"
-                            f"🎵 <b>Last Song:</b> <code>{self.current_song[:35]}</code>"
-                        )
-                        await self._send_notify(status_report)
-
-                    # Soft pause 3-4s between songs (Anti-rate limit)
-                    await asyncio.sleep(3.5)
-
-                await self._send_notify(f"✅ <b>Completed Category:</b> {g_info['label']}\nSongs Processed: {genre_downloaded}")
+                if self.is_running:
+                    await self._send_notify(f"✅ <b>Category Completed:</b> {g_info['label']}\nMoving to next category...")
+                    await asyncio.sleep(2.0)
 
         disk = self.get_disk_stats()
         summary_text = (

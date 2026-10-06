@@ -951,6 +951,7 @@ async def handle_harvest_menu(chat_id: int, message_id_to_edit: Optional[int] = 
     text = (
         f"🌾 <b>Aᴜᴛᴏ-Hᴀʀᴠᴇsᴛ &amp; Pʀᴇ-Cᴀᴄʜᴇ Eɴɢɪɴᴇ</b>\n\n"
         f"• <b>Sᴛᴀᴛᴜs:</b> <b>{running_icon}</b>\n"
+        f"• <b>Pᴀʀᴀʟʟᴇʟ Sʟᴏᴛs:</b> <code>{st['concurrency']} Concurrent Workers</code>\n"
         f"• <b>Cᴜʀʀᴇɴᴛ Gᴇɴʀᴇ:</b> <code>{st['current_genre']}</code>\n"
         f"• <b>Cᴜʀʀᴇɴᴛ Sᴏɴɢ:</b> <code>{st['current_song'][:35]}</code>\n\n"
         f"📊 <b>Pʀᴏɢʀᴇss:</b>\n"
@@ -1573,6 +1574,7 @@ async def handle_callback_query(cq: dict):
         from harvester import harvest_manager
         started = harvest_manager.start(
             target_per_category=50,
+            concurrency=3,
             notify_callback=lambda txt: send_msg(chat_id, txt)
         )
         if started:

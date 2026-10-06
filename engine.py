@@ -114,19 +114,19 @@ async def convert_media_ffmpeg(src_path: Path, dst_path: Path, target_fmt: str) 
     if not shutil.which("ffmpeg"):
         return False
 
-    temp_path = dst_path.with_suffix(dst_path.suffix + ".transcode.tmp")
+    temp_path = dst_path.with_name(f"tmp_{dst_path.name}")
     target = target_fmt.lower()
 
     if target == "mp3":
-        c_args = ["-vn", "-c:a", "libmp3lame", "-b:a", "320k"]
+        c_args = ["-vn", "-c:a", "libmp3lame", "-b:a", "320k", "-f", "mp3"]
     elif target == "opus":
-        c_args = ["-vn", "-c:a", "libopus", "-b:a", "128k"]
+        c_args = ["-vn", "-c:a", "libopus", "-b:a", "128k", "-f", "opus"]
     elif target == "m4a":
-        c_args = ["-vn", "-c:a", "aac", "-b:a", "192k"]
+        c_args = ["-vn", "-c:a", "aac", "-b:a", "192k", "-f", "mp4"]
     elif target == "flac":
-        c_args = ["-vn", "-c:a", "flac"]
+        c_args = ["-vn", "-c:a", "flac", "-f", "flac"]
     elif target == "wav":
-        c_args = ["-vn", "-c:a", "pcm_s16le"]
+        c_args = ["-vn", "-c:a", "pcm_s16le", "-f", "wav"]
     else:
         c_args = ["-vn", "-c:a", "copy"]
 
