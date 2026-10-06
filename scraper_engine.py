@@ -565,8 +565,9 @@ async def download_via_loader(
                 if not progress_url:
                     return False
 
-            # Ultra-fast polling: 0.15s initial, then 0.35s intervals (up to ~42s)
-            for attempt in range(120):
+            # Ultra-fast polling: 0.15s initial, then 0.35s intervals (up to ~35s)
+            stream_download_attempts = 0
+            for attempt in range(80):
                 await asyncio.sleep(0.15 if attempt == 0 else 0.35)
                 try:
                     async with session.get(progress_url, timeout=aiohttp.ClientTimeout(total=4.0)) as resp2:
@@ -574,26 +575,37 @@ async def download_via_loader(
                             pdata = await resp2.json(content_type=None)
                             dl_url = pdata.get("download_url")
                             if dl_url and dl_url.startswith("http") and not dl_url.endswith(".html"):
-                                logger.info(f"[LoaderScraper] Stream ready for {video_id}. Downloading into {target_path.name}...")
-                                # Stream download with Content-Length check to break immediately on completion
-                                temp_path = target_path.with_suffix(target_path.suffix + ".part")
+                                stream_download_attempts += 1
+                                logger.info(f"[LoaderScraper] Stream ready for {video_id}. Downloading into {target_path.name} (attempt {stream_download_attempts})...")
+                                temp_path = target_path.with_name(f"tmp_{target_path.name}.part")
                                 temp_path.parent.mkdir(parents=True, exist_ok=True)
-                                async with session.get(dl_url, timeout=aiohttp.ClientTimeout(total=60.0, sock_read=15.0)) as dl_resp:
-                                    if dl_resp.status == 200:
-                                        content_len = dl_resp.headers.get("Content-Length")
-                                        total_bytes = int(content_len) if content_len and content_len.isdigit() else 0
-                                        downloaded = 0
-                                        async with aiofiles.open(temp_path, "wb") as f:
-                                            async for chunk in dl_resp.content.iter_chunked(256 * 1024):
-                                                await f.write(chunk)
-                                                downloaded += len(chunk)
-                                                if total_bytes > 0 and downloaded >= total_bytes:
-                                                    break
+                                try:
+                                    async with session.get(dl_url, timeout=aiohttp.ClientTimeout(total=45.0, sock_read=15.0)) as dl_resp:
+                                        if dl_resp.status == 200:
+                                            content_len = dl_resp.headers.get("Content-Length")
+                                            total_bytes = int(content_len) if content_len and content_len.isdigit() else 0
+                                            downloaded = 0
+                                            async with aiofiles.open(temp_path, "wb") as f:
+                                                async for chunk in dl_resp.content.iter_chunked(256 * 1024):
+                                                    await f.write(chunk)
+                                                    downloaded += len(chunk)
+                                                    if total_bytes > 0 and downloaded >= total_bytes:
+                                                        break
 
-                                        if temp_path.exists() and temp_path.stat().st_size > 1024:
-                                            temp_path.replace(target_path)
-                                            logger.info(f"[LoaderScraper] Download SUCCESS: {target_path.name} ({target_path.stat().st_size} bytes)")
-                                            return True
+                                            if temp_path.exists() and temp_path.stat().st_size > 1024:
+                                                temp_path.replace(target_path)
+                                                logger.info(f"[LoaderScraper] Download SUCCESS: {target_path.name} ({target_path.stat().st_size} bytes)")
+                                                return True
+                                except Exception as dl_err:
+                                    logger.warning(f"[LoaderScraper] Stream download error for {video_id}: {dl_err}")
+                                finally:
+                                    if temp_path.exists():
+                                        temp_path.unlink(missing_ok=True)
+
+                                # If stream download failed twice, abort immediately to prevent hanging
+                                if stream_download_attempts >= 2:
+                                    logger.warning(f"[LoaderScraper] Stream download failed after {stream_download_attempts} attempts for {video_id}. Aborting.")
+                                    return False
                 except Exception as poll_err:
                     logger.debug(f"[LoaderScraper] Poll attempt {attempt} note: {poll_err}")
 

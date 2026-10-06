@@ -458,7 +458,13 @@ class HarvestManager:
                     else:
                         track = item
 
-                    ok = await self._harvest_single_track(track)
+                    try:
+                        ok = await asyncio.wait_for(self._harvest_single_track(track), timeout=75.0)
+                    except asyncio.TimeoutError:
+                        logger.warning(f"[Harvester Worker] Track {track.get('id')} timed out after 75s. Skipping.")
+                        self.total_failed += 1
+                        ok = False
+
                     if ok:
                         # Instant Telegram Notification for this exact resolved song!
                         disk_now = self.get_disk_stats()
